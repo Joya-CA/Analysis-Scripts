@@ -1,0 +1,273 @@
+---
+title: "Variance Mesocosm Visualisation"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+date: "2025-08-04"
+---
+
+```{r setup, include=TRUE}
+# Load packages
+library(readxl)
+library(nlme)
+library(lme4)
+library(DAAG)
+library(ggplot2)
+library(dplyr)
+library(MuMIn)
+library(car)
+library(viridis)
+library(DHARMa)
+library(FSA)
+library(emmeans)
+library(ggpubr)
+library(performance)
+library(cowplot)
+```
+
+## Load in the the datasets
+
+```{r}
+#Import the data
+data <- read_excel(file.path(
+  "C:/Users/Joyalea/Documents/UBCO/Thesis",
+  "Final_Files",
+  "RQ1_AMFAbundance",
+  "Variance_Longform_M24_M25.xlsx"
+))
+
+#Clean and format columns
+data <- data %>%
+  mutate(
+    sample_group = gsub("[A-Z]$", "", sample_id),
+    mesocosm_id = case_when(
+      sample_group %in% c("Br70", "Br71", "Br72", "Ga70", "Ga71", 
+                          "Ga72", "Fe70", "Fe71", "Fe72", "Ta70", "Ta71", 
+                          "Ta72") ~ 24,
+      sample_group %in% c("Br73", "Br74", "Br75", "Ga73", "Ga74", "Ga75", 
+                          "Fe73", "Fe74", "Fe75", "Ta73", "Ta74", "Ta75") ~ 25,
+      TRUE ~ NA_real_
+    ),
+    sample_id = as.factor(sample_id),
+    species = as.factor(species),
+    sample_group = as.factor(sample_group),
+    copies_uL = as.numeric(copies_uL))
+
+#Load dilution + elution data
+dilution_data <-read_excel(file.path(
+  "C:/Users/Joyalea/Documents/UBCO/Thesis",
+  "Final_Files",
+  "RQ1_AMFAbundance",
+  "Variance_DilutionFactors_All.xlsx"
+))
+
+View(data)
+
+#Keep relevant columns
+dilution_data <- dilution_data %>%
+  select(sample_id, dilution_factor, elution_volume)
+
+#Join the dilution data to the main ddPCR longform dataset
+data <- data %>%
+  left_join(dilution_data, by = "sample_id")
+
+#Define root mass used per extraction
+data <- data %>%
+  mutate(root_mass = case_when(
+    species %in% c("Bromus", "Festuca") ~ 0.1,
+    species %in% c("Gaillardia", "Taraxacum") ~ 0.2,
+    TRUE ~ NA_real_
+  ))
+
+#Calculate total copies and copies per gram (22 uL used per reaction)
+data <- data %>%
+  mutate(
+    total_copies = copies_uL * 22 * dilution_factor * elution_volume,
+    copies_g = total_copies / root_mass
+  )
+
+#Calculate total copies in elution volume. Use total copies to calculate
+#copies per gram of host root
+data <- data %>%
+  mutate(
+    total_copies = copies_uL * elution_volume * dilution_factor,
+    copies_g = total_copies / root_mass
+  )
+
+```
+
+## Visualise variation (1) within a host and (2) between hosts
+
+```{r, echo=TRUE}
+
+#Subset by mesocosm
+data_24 <- filter(data, mesocosm_id == 24)
+data_25 <- filter(data, mesocosm_id == 25)
+
+#Define host species colors
+species_colors <- c(
+  "Bromus" = "#1b9e77",
+  "Festuca" = "#d95f02",
+  "Gaillardia" = "#7570b3",
+  "Taraxacum" = "#e7298a"
+)
+
+#Plot
+#Within mesocosms variation: MESOCOSM 24
+within_host_24_clean <- ggplot(data_24, aes(x = sample_group, y = log(copies_g), fill = species)) +
+  geom_boxplot(alpha = 0.8, width = 0.6) +
+  scale_fill_manual(values = species_colors) +
+  labs(
+    subtitle = "Mesocosm 24",
+    x = "Individual Host",
+    y = "Copies of mat-loci gene per gram of host root \n (log scale)",
+    fill = "Species"
+  ) +
+  coord_cartesian(ylim = c()) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+    strip.text = element_text(face = "italic")
+  )
+
+#Within mesocosms variation: MESOCOSM 25
+within_host_25_clean <- ggplot(data_25, aes(x = sample_group, y = log(copies_g), fill = species)) +
+  geom_boxplot(alpha = 0.8, width = 0.6) +
+  scale_fill_manual(values = species_colors) +
+  labs(
+    subtitle = "Mesocosm 25",
+    x = "Individual Host",
+    y = "Copies of mat-loci gene per gram of host root \n (log scale)"
+  ) +
+  coord_cartesian(ylim = c()) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+    strip.text = element_text(face = "italic"),
+    legend.position = "none"  # Hide legend in second plot
+  )
+
+#Extract legend from first plot
+legend <- cowplot::get_legend(within_host_25_clean + theme(legend.position = "right"))
+#Combine plots without legends
+plots_combined <- cowplot::plot_grid(
+  within_host_24_clean + theme(legend.position = "none"),
+  within_host_25_clean,
+  ncol = 1,
+  labels = c("A", "B")
+)
+#Add shared legend to the right
+final_plot <- cowplot::plot_grid(plots_combined, legend, rel_widths = c(3, 0.6))
+print(final_plot)
+
+#Between hosts
+#Plot
+between_host_plot <- ggplot(bind_rows(data_24, data_25), aes(x = species, y = log(copies_g), fill = species)) +
+  geom_boxplot(alpha = 0.8, width = 0.6) +
+  facet_wrap(~ mesocosm_id) +
+  labs(
+    title = "Between-Host Variation in AMF Abundance",
+    subtitle = "Variation across hosts of the same species within each mesocosm",
+    x = "Species",
+    y = "Copies of mat-loci gene per gram of host root \n (log scale)"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+print(between_host_plot)
+
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+## Calculate the coefficient of variation (1) Within hosts and (2) Between hosts
+
+```{r}
+
+#Calculate CV within each individual host (within-host)
+#Ensure within group comparisons have > 2 observations
+valid_within_groups <- data %>%
+  filter(copies_g > 0) %>%
+  group_by(sample_group, species, mesocosm_id) %>%
+  summarise(n_reps = n(), .groups = "drop") %>%
+  filter(n_reps >= 2)
+
+cv_within_hosts <- data %>%
+  semi_join(valid_within_groups, by = c("sample_group", "species", "mesocosm_id")) %>%
+  group_by(sample_group, species, mesocosm_id) %>%
+  summarise(
+    mean = mean(copies_g, na.rm = TRUE),
+    sd = sd(copies_g, na.rm = TRUE),
+    cv = (sd / mean) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(level = "Within-host")
+
+#Calculate CV between hosts (conspecifics in same mesocosm)
+#Have to filter species * mesocosm groups where >2 hosts have non-zero abundance
+#Can't claculate CV for 1 observation
+valid_between_groups <- data %>%
+  filter(copies_g > 0) %>%
+  group_by(species, mesocosm_id) %>%
+  summarise(n_hosts = n_distinct(sample_group), .groups = "drop") %>%
+  filter(n_hosts >= 2)
+
+#calculate CV using groups with >2 observations
+cv_between_hosts <- data %>%
+  semi_join(valid_between_groups, by = c("species", "mesocosm_id")) %>%
+  group_by(species, mesocosm_id) %>%
+  summarise(
+    mean = mean(copies_g, na.rm = TRUE),
+    sd = sd(copies_g, na.rm = TRUE),
+    cv = (sd / mean) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(level = "Between-host")
+
+#Combine into one dataframe
+cv_comparison <- bind_rows(cv_within_hosts, cv_between_hosts)
+#View CV within and between hosts
+print(cv_comparison, n =Inf)
+
+#Create levels (within and between) for the plot
+cv_comparison$level <- factor(cv_comparison$level, 
+                              levels = c("Within-host", "Between-host"))
+
+#Plot
+cv_species_facet <- ggplot(cv_comparison, aes(x = level, y = cv, fill = level)) +
+  geom_boxplot(alpha = 0.8, width = 0.6, outlier.shape = NA) +
+ # geom_jitter(width = 0.15, shape = 21, size = 2, alpha = 0.7, color = "black") +
+  facet_wrap(~ species) +
+  scale_y_continuous(limits = c(0, NA), expand = c(0, 0)) +
+  labs(
+    title = "Coefficient of Variation (CV) within and between hosts",
+    subtitle = "Faceted by species",
+    x = "Variation Level",
+    y = "CV (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+    strip.text = element_text(face = "italic")
+  )
+print(cv_species_facet)
+
+#Perform a wilcoxon-rank summed test to see if there is a significant difference
+#in within vs between host CV
+wilcox.test(cv ~ level, data = cv_comparison) #significant
+
+```

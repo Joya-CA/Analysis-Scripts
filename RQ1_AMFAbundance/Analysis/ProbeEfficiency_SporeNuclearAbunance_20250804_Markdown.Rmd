@@ -1,0 +1,349 @@
+---
+title: "Probe Efficiency and Single Spore Analysis"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-08-04"
+---
+
+```{r setup, include=TRUE}
+#Load necessary libraries
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+library(rstatix)
+```
+
+## Load in the dataset (probe efficiency tests)
+
+```{r}
+
+#Read each Excel file into a separate dataframe
+df_197198 <- read_excel(file.path(
+  "C:/Users/Joyalea/Documents/UBCO/Thesis",
+  "Final_Files",
+  "RQ1_AMFAbundance",
+  "197198_SyntheticDNA.xlsx"
+))
+df_240448 <- read_excel(file.path(
+  "C:/Users/Joyalea/Documents/UBCO/Thesis",
+  "Final_Files",
+  "RQ1_AMFAbundance",
+  "240448_SyntheticDNA.xlsx"
+))
+df_240720 <- read_excel(file.path(
+  "C:/Users/Joyalea/Documents/UBCO/Thesis",
+  "Final_Files",
+  "RQ1_AMFAbundance",
+  "240720_SyntheticDNA.xlsx"
+))
+summary(df_197198)
+summary(df_240448)
+summary(df_240720)
+
+#Combine the datasets
+df_197198$Primer <- "197198"
+df_240448$Primer <- "240448"
+df_240720$Primer <- "240720"
+
+#Combine all
+df_all <- dplyr::bind_rows(df_197198, df_240448, df_240720)
+
+#Add a new column: Copies_24 = Concentration * 24 [total reaction volume]
+df_all <- df_all %>%
+  mutate(Copies_24 = Concentration * 24)
+
+summary(df_all)
+
+```
+
+## Visualise probe efficiencies
+
+```{r, echo=FALSE}
+#Create a histogram
+ggplot(df_all, aes(x = Copies_24, fill = Primer)) +
+  geom_histogram(binwidth = 50, color = "black", alpha = 0.7, position = "identity") +
+  facet_wrap(~ Primer, scales = "free_y") +
+  labs(
+    title = "Distribution of ddPCR Copy Numbers",
+    x = "Copies per 20 µL well",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+#Create a scatter plot to visualise individual points
+ggplot(df_all, aes(x = Sample, y = Copies_24, colour = Primer)) +
+  geom_point() +
+  facet_wrap(~ Primer, scales = "free_x") +  # changed here
+  labs(
+    title = "Concentration by Sample",
+    x = "Sample",
+    y = "Copies per 20 µL well"
+  ) +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2", name="Primer-Probe") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+#Calculate summary stats of the primers
+summary_stats <- df_all %>%
+  group_by(Primer, Sample) %>%
+  summarise(
+    mean_copies = mean(Copies_24, na.rm = TRUE),
+    sd_copies = sd(Copies_24, na.rm = TRUE),
+    n = n(),
+    cv_percent = (sd_copies / mean_copies) * 100
+  ) %>%
+  ungroup()
+
+summary_stats
+
+#Plot the mean + SD
+SD_dilutions<-ggplot(summary_stats, aes(x = Sample, y = mean_copies, fill = Primer)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = mean_copies - sd_copies,
+                    ymax = mean_copies + sd_copies),
+                width = 0.2,
+                position = position_dodge(width = 0.9)) +
+  facet_wrap(~ Primer, scales = "free_x") + 
+  labs(
+    title = "Mean ddPCR Copy Number with SD",
+    x = "Sample",
+    y = "Copies per 24 µL well"
+  ) +
+  scale_fill_brewer(palette = "Dark2", name = "Primer-Probe") +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),   # remove major grid lines
+    panel.grid.minor = element_blank(),   # remove minor grid lines
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black")  # retain x and y axis lines
+  )
+print(SD_dilutions)
+
+#Add an expected concentration column (diltuion series of 100, 1000 and 10000
+#expected copies)
+summary_stats <- summary_stats %>%
+  mutate(expected_copies = case_when(
+    grepl("10,000", Sample) ~ 10000,
+    grepl("1000", Sample) ~ 1000,
+    grepl("100", Sample) ~ 100,
+    grepl("\\+", Sample) ~ NA_real_,   # Optional: '+' samples might be unknown
+    grepl("NTC", Sample, ignore.case = TRUE) ~ 0,
+    TRUE ~ NA_real_
+  ))
+
+#Cacluate recovery factor
+summary_stats <- summary_stats %>%
+  mutate(
+    recovery_ratio = mean_copies / expected_copies
+  )
+print(summary_stats, n=Inf)
+
+#Create a plot of recovery factor
+recovery_plot<-ggplot(summary_stats %>% filter(!is.na(recovery_ratio)), 
+                      aes(x = Sample, y = recovery_ratio, fill = Primer)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  facet_wrap(~ Primer, scales = "free_x") +
+  geom_hline(yintercept = c(0.25, 0.5, 0.75, 1), 
+             linetype = "dashed", color = "grey50", linewidth = 0.4) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  labs(
+    title = "Recovery Ratio (Measured Versus Expected Copies)",
+    x = "Sample",
+    y = "Recovery Ratio"
+  ) +
+  scale_fill_brewer(palette = "Dark2", name = "Primer-Probe") +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),   # remove major grid lines
+    panel.grid.minor = element_blank(),   # remove minor grid lines
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black")  # retain x and y axis lines
+  )
+print(recovery_plot)
+
+#Combine plots vertically
+combined_plot <- plot_grid(
+  SD_dilutions, recovery_plot,
+  labels = c("A", "B"),   # Optional: adds "A", "B" panel labels
+  ncol = 1,               # Stack plots vertically
+  align = "v"             # Align vertically
+)
+
+```
+
+# Single spore extractions
+```{r}
+#Upload the dataset
+df_spore <- 
+  read.csv(file.path(
+    "C:/Users/Joyalea/Documents/UBCO/Thesis",
+    "Final_Files",
+    "RQ1_AMFAbundance",
+    "SingleSpore_AllIsolates.csv"))
+head(df_spore)
+
+#Add Primer column
+df_spore <- df_spore %>%
+  mutate(
+    Primer = case_when(
+      grepl("197198", Sample) ~ "197198",
+      grepl("240448", Sample) ~ "240448",
+      grepl("240720", Sample) ~ "240720",
+      TRUE ~ NA_character_
+    ),
+    Copies_24 = Concentration * 24  # New column
+  )
+
+#Convert primer to a factor
+df_spore$Primer<-as.factor(df_spore$Primer)
+
+#Calculate summary stats of the primers (MEAN)
+summary_stats_spore <- df_spore %>%
+  group_by(Primer) %>%
+  summarise(
+    mean_copies = mean(Copies_24, na.rm = TRUE),
+    sd_copies = sd(Copies_24, na.rm = TRUE),
+    n = n(),
+    cv_percent = (sd_copies / mean_copies) * 100
+  ) %>%
+  ungroup()
+
+summary_stats_spore
+
+#Calculate summary stats of the primers
+summary_stats_spore_sample <- df_spore %>%
+  group_by(Primer, Sample) %>%
+  summarise(
+    mean_copies = mean(Copies_24, na.rm = TRUE),
+    sd_copies = sd(Copies_24, na.rm = TRUE),
+    n = n(),
+    cv_percent = (sd_copies / mean_copies) * 100
+  ) %>%
+  ungroup()
+
+#Calculate summary stats of the primers
+summary_stats_spore_sample_median <- df_spore %>%
+  group_by(Primer) %>%
+  summarise(
+    median_copies = median(Copies_24, na.rm = TRUE),
+    sd_copies = sd(Copies_24, na.rm = TRUE),
+    n = n(),
+  ) %>%
+  ungroup()
+summary_stats_spore_sample_median
+
+#Plot the mean + SD
+spores_plot<-ggplot(summary_stats_spore_sample, aes(x = Sample, y = mean_copies, fill = Primer)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = mean_copies - sd_copies,
+                    ymax = mean_copies + sd_copies),
+                width = 0.2,
+                position = position_dodge(width = 0.9)) +
+  facet_wrap(~ Primer, scales = "free_x") + 
+  labs(
+    title = "Nuclei per AMF isolate spore",
+    x = "Sample",
+    y = "Nuclei per spore"
+  ) +
+  scale_fill_brewer(palette = "Dark2", name = "AMF Isolate") +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),   # remove major grid lines
+    panel.grid.minor = element_blank(),   # remove minor grid lines
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black")  # retain x and y axis lines
+  )
+print(spores_plot)
+
+mean_spore<-ggplot(summary_stats_spore, aes(x = Primer, y = mean_copies, fill = Primer)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = mean_copies - sd_copies,
+                    ymax = mean_copies + sd_copies),
+                width = 0.2,
+                position = position_dodge(width = 0.9)) +
+  facet_wrap(~ Primer, scales = "free_x") + 
+  labs(
+    title = "Mean nuclei per spore",
+    x = "AMF isolate",
+    y = "Nuclei per spore"
+  ) +
+  scale_fill_brewer(palette = "Dark2", name = "AMF Isolate") +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),  
+    panel.grid.minor = element_blank(),  
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black") 
+  )
+print(mean_spore)
+
+#Combine plots vertically
+combined_plot_spore <- plot_grid(
+  spores_plot, mean_spore,
+  labels = c("A", "B"),   
+  ncol = 1,              
+  align = "v"             
+)
+
+#Compare whether nuclear abundance significantly differs
+#Do spores of three AMF isolates differ in nuclear abundance?
+#Test assumptions of normality
+#Shapiro test
+by(df_spore$Copies_24, df_spore$Primer, shapiro.test) #pass
+#Leven test
+car::leveneTest(Copies_24 ~ Primer, data = df_spore) #fail
+#assumption of homogeneity of variance violated, use a Kruskal Wallis
+
+#Copies per 24uL [reaction volume used] (copies/spore) ~ primer-probe
+kruskal.test(Copies_24 ~ Primer, data = df_spore) #Significant
+#Post-hoc Dunn
+FSA::dunnTest(Copies_24 ~ Primer, data = df_spore, method = "bh")
+#Significant difference between DAOM 240448 and DAOM 240720
+
+# Calculate y_star just above the max of mean + SD
+y_star <- max(summary_stats_spore$mean_copies + summary_stats_spore$sd_copies, na.rm = TRUE) + 10
+
+#Add signfiicance star to the plot
+mean_spore <- ggplot(summary_stats_spore, aes(x = Primer, y = mean_copies, fill = Primer)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = mean_copies - sd_copies,
+                    ymax = mean_copies + sd_copies),
+                width = 0.2,
+                position = position_dodge(width = 0.9)) +
+  labs(
+    title = "Mean nuclei per spore",
+    x = "AMF Isolate",
+    y = "Nuclei per spore"
+  ) +
+  scale_fill_brewer(palette = "Dark2", name = "AMF Isolate") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black")
+  ) +
+  # Bracket and star (outside theme!)
+  geom_segment(aes(x = 2, xend = 3, y = y_star, yend = y_star)) +
+  geom_segment(aes(x = 2, xend = 2, y = y_star, yend = y_star - 10)) +
+  geom_segment(aes(x = 3, xend = 3, y = y_star, yend = y_star - 10)) +
+  geom_text(aes(x = 2.5, y = y_star + 3), label = "*", size = 6)
+
+print(mean_spore)
+
+
+```
