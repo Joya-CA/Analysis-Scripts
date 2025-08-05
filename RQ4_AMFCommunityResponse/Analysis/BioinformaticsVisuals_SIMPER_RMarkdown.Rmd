@@ -1,0 +1,284 @@
+---
+title: "Bioinformatics Visuals"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-08-05"
+---
+
+```{r setup, include=TRUE}
+# Load required libraries
+library(tidyverse)
+library(vegan)
+library(ggpubr)
+library(reshape2)
+library(ggvenn)
+```
+
+## Load in the file exports (diversity metrics, taxonomic assignments, unique OTUs)
+
+```{r}
+
+#Set file path
+dir <- file.path(
+  "C:", "Users", "Joyalea", "Documents", "UBCO", "Thesis",
+  "Final_Files", "RQ4_AMFCommunityResponse", "file_exports_97_blastn_merged"
+)
+
+#Load alpha diversity metrics
+richness <- read_tsv(file.path(dir, "observed_features_vector.tsv"))
+shannon  <- read_tsv(file.path(dir, "shannon_vector_97.tsv"))
+evenness <- read_tsv(file.path(dir, "evenness_vector.tsv"))
+
+#Rename ID columns for consistency
+colnames(richness)[1] <- "SampleID"
+colnames(shannon)[1]  <- "SampleID"
+colnames(evenness)[1] <- "SampleID"
+
+#Rename metric columns for clarity
+colnames(richness)[2] <- "Richness"
+colnames(shannon)[2]  <- "Shannon"
+colnames(evenness)[2] <- "Evenness"
+
+#Merge all alpha metrics
+alpha_df <- reduce(list(richness, shannon, evenness), inner_join, by = "SampleID")
+
+#Load metadata
+metadata <- read_tsv(file.path(
+  "C:", "Users", "Joyalea", "Documents", "UBCO", "Thesis",
+  "Final_Files", "RQ4_AMFCommunityResponse", "METADATA.tsv"
+))
+
+#Merge with metadata
+alpha_merged <- inner_join(metadata, alpha_df, by = "SampleID")
+
+#Check column names and that data was correctly uploaded
+colnames(alpha_merged)
+head(alpha_merged)
+
+```
+
+## Create visuals of the alpha diversity metrics
+
+```{r, echo=TRUE}
+
+#Plot alpha metrics
+#RICHNESS
+print(mean_richness<-ggplot(alpha_merged, aes(x = Treatment, y = Richness, color = Treatment)) +
+  stat_summary(fun = mean, geom = "point", size = 4) +
+  coord_cartesian(ylim = c(0,70))+
+  scale_colour_brewer(palette = "Dark2") +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.2) +
+  labs(x = "AMF Isolate Treatment", y = "Richness (Unique OTUs)", colour = 
+         "AMF isolate") +
+  theme_minimal()+
+  
+  theme(
+    panel.grid = element_blank(),               #Removes all grid lines
+    axis.line = element_line(color = "black"),  #Adds black x and y axis lines
+    axis.ticks = element_line(color = "black")  #show tick marks
+  ))
+
+#SHANNON
+print(mean_shannon<-ggplot(alpha_merged, aes(x = Treatment, y = Shannon, color = Treatment)) +
+  stat_summary(fun = mean, geom = "point", size = 4) +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.2) +
+  scale_colour_brewer(palette = "Dark2") +
+  coord_cartesian(ylim = c(0,5))+
+  labs(y = "Shannon Index", colour = 
+         "AMF isolate") +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),               #Removes all grid lines
+    axis.line = element_line(color = "black"),  #Adds black x and y axis lines
+    axis.ticks = element_line(color = "black")  #show tick marks
+  ))
+
+#EVENNESS
+print(mean_evenness<- ggplot(alpha_merged, aes(x = Treatment, y = Evenness, color = Treatment)) +
+  stat_summary(fun = mean, geom = "point", size = 4) +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.2) +
+  scale_colour_brewer(palette = "Dark2") +
+  coord_cartesian(ylim = c(0,1))+
+  labs(x = NULL, y = "Pielou's Evenness", colour = 
+         "AMF isolate") +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),               #Removes all grid lines
+    axis.line = element_line(color = "black"),  #Adds black x and y axis lines
+    axis.ticks = element_line(color = "black")  #show tick marks
+  ))
+
+```
+
+## Create rarefication curves
+
+```{r, echo=TRUE}
+
+#Set your path
+feature_table_path <- file.path(
+  "C:", "Users", "Joyalea", "Documents", "UBCO", "Thesis",
+  "Final_Files", "RQ4_AMFCommunityResponse", "file_exports_97_blastn_merged",
+  "feature_table_97.tsv")
+
+#Load feature table
+feature_table <- read_tsv(feature_table_path, skip = 1)
+
+#Convert feature table to a matrix
+otu_matrix <- feature_table %>%
+  column_to_rownames(var = "#OTU ID") %>%
+  t() %>%
+  as.data.frame()
+
+#Match metadata to OTU matrix
+metadata <- metadata %>% filter(SampleID %in% rownames(otu_matrix))
+
+#Set consistent row order
+otu_matrix <- otu_matrix[metadata$SampleID, ]
+
+#Assign treatment colors for plotting
+treatment_colors <- RColorBrewer::brewer.pal(n = length(unique(metadata$Treatment)), name = "Set1")
+names(treatment_colors) <- unique(metadata$Treatment)
+sample_colors <- treatment_colors[metadata$Treatment]
+
+#MAKE THE PLOT LOOKS NICE
+#Simulate rarefaction across samples
+depths <- seq(0, min(rowSums(otu_matrix)), by = 1000)
+
+rarefied_full <- map_dfr(depths, function(d) {
+  rarefied <- rrarefy(otu_matrix, sample = d)
+  richness <- rowSums(rarefied > 0)
+  tibble(SampleID = names(richness), Richness = richness, Depth = d)
+}) %>%
+  left_join(metadata, by = "SampleID")
+
+#Summarize curves with with SE
+rarefied <- rarefied_full %>%
+  group_by(Treatment, Depth) %>%
+  summarize(
+    MeanRichness = mean(Richness),
+    SERichness = sd(Richness) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(Treatment = factor(Treatment))
+
+ggplot(rarefied, aes(x = Depth, y = MeanRichness, color = Treatment)) +
+  geom_ribbon(aes(
+    ymin = MeanRichness - SERichness,
+    ymax = MeanRichness + SERichness,
+    fill = Treatment
+  ), alpha = 0.3, color = NA) +
+  geom_line(size = 1) +
+  labs(
+    title = "Rarefaction Curves by Treatment",
+    x = "Sequencing Depth",
+    y = "Observed Richness"
+  ) +
+  theme_minimal()
+
+```
+
+## Unique OTU visualistion
+```{r, echo=TRUE}
+
+#Convert wide table into long format
+otu_table_long <- feature_table %>%
+  rename(FeatureID = `#OTU ID`) %>%
+  pivot_longer(-FeatureID, names_to = "SampleID", values_to = "Abundance") %>%
+  filter(Abundance > 0) %>%  # Keep only present OTUs
+  left_join(metadata %>% select(SampleID, Treatment), by = "SampleID")
+
+
+#Keep distinct OTU-treatment combinations
+venn_df <- otu_table_long %>%
+  distinct(Treatment, FeatureID)
+
+#Create list of OTUs by treatment
+otu_lists <- venn_df %>%
+  group_by(Treatment) %>%
+  summarize(OTUs = list(unique(FeatureID)), .groups = "drop") %>%
+  deframe()
+
+#Plot Venn diagram
+ggvenn(otu_lists,
+       fill_color = c("#E69F00", "#56B4E9", "#009E73", "#D55E00")[1:length(otu_lists)],
+       stroke_size = 0.5,
+       set_name_size = 4)
+
+```
+## Run SIMPER anlaysis on p/a to investigate what drove the signifcant Jaccard result
+
+```{r, echo=TRUE}
+#Convert OTU table to wide format
+otu_wide <- dcast(
+  otu_table_long,
+  SampleID ~ FeatureID,
+  value.var = "Abundance",
+  fill = 0
+)
+
+otu_wide_mat <- otu_wide %>%
+  column_to_rownames("SampleID")
+
+#Align metada
+metadata_simper <- metadata %>%
+  filter(SampleID %in% rownames(otu_wide_mat)) %>%
+  arrange(match(SampleID, rownames(otu_wide_mat)))
+
+#Convert OTU table to presence/absence
+otu_pa <- decostand(otu_wide_mat, method = "pa")
+
+#Subset dataset and run simper for DAOM240448 vs DAOM 240720
+subset_meta_1 <- metadata_simper %>%
+  filter(Treatment %in% c("240448", "240720"))
+
+subset_otu_1 <- otu_pa[rownames(otu_pa) %in% subset_meta_1$SampleID, ]
+
+simper_jaccard_1 <- simper(subset_otu_1, subset_meta_1$Treatment, permutations = 999)
+
+simper_df_1 <- as.data.frame(summary(simper_jaccard_1)$`240448_240720`)
+simper_df_1$FeatureID <- rownames(simper_df_1)
+simper_df_1 <- simper_df_1[order(-simper_df_1$average), ]
+
+top_simper_1 <- head(simper_df_1, 10)
+print(top_simper_1)
+
+#Subset and run SIMPER for DAOM240448 vs the control
+subset_meta_2 <- metadata_simper %>%
+  filter(Treatment %in% c("240448", "Control"))
+
+subset_otu_2 <- otu_pa[rownames(otu_pa) %in% subset_meta_2$SampleID, ]
+
+simper_jaccard_2 <- simper(subset_otu_2, subset_meta_2$Treatment, permutations = 999)
+
+simper_df_2 <- as.data.frame(summary(simper_jaccard_2)$`Control_240448`)
+simper_df_2$FeatureID <- rownames(simper_df_2)
+simper_df_2 <- simper_df_2[order(-simper_df_2$average), ]
+
+top_simper_2 <- head(simper_df_2, 10)
+print(top_simper_2)
+
+#Plot the top contributors for each contrast
+#240448 vs 240720
+ggplot(top_simper_1, aes(x = reorder(FeatureID, average), y = average)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Jaccard SIMPER Contributors: 240448 vs 240720",
+    x = "Feature ID",
+    y = "Average Contribution"
+  ) +
+  theme_minimal()
+
+#240448 vs Control
+ggplot(top_simper_2, aes(x = reorder(FeatureID, average), y = average)) +
+  geom_col(fill = "darkgreen") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Jaccard SIMPER Contributors: 240448 vs Control",
+    x = "Feature ID",
+    y = "Average Contribution"
+  ) +
+  theme_minimal()
+
+```
