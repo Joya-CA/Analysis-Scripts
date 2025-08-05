@@ -1,0 +1,733 @@
+---
+title: "Host Response"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-08-04"
+---
+
+```{r setup, include=TRUE}
+#Load in all packages
+library(readxl)
+library(nlme)
+library(lme4)
+library(DAAG)
+library(ggplot2)
+library(dplyr)
+library(MuMIn)
+library(car)
+library(viridis)
+library(DHARMa)
+library(FSA)
+library(emmeans)
+library(ggpubr)
+library(rstatix)
+library(glmmTMB)
+library(boot)
+```
+
+## Import the dataset
+
+```{r}
+#Import the dataset
+data <- read.csv(file.path(
+  "C:/Users/Joyalea/Documents/UBCO/Thesis",
+  "Final_Files",
+  "RQ2_HostResponse",
+  "host_response_2024.csv"
+))
+
+#Add treatment group column
+data <- data %>%
+  mutate(treatment = ifelse(mesocosm_id %in% c(1:7), "Control",
+                            ifelse(mesocosm_id %in% c(8:14), "197198",
+                                   ifelse(mesocosm_id %in% c(15:21), "240448",
+                            ifelse(mesocosm_id %in% c(22:28), "240720", NA)))),
+         block = ifelse(mesocosm_id %in% c(15, 20, 22, 12, 11, 14, 24, 27, 19, 
+                                           21, 25, 3, 2, 7), "A",
+                      ifelse(mesocosm_id %in% c(4, 17, 9, 28, 6, 1, 5, 18, 8, 
+                                                26, 16, 23, 13, 10), "B", NA)))
+#Review data import
+head(data)
+str(data)
+tail(data)
+
+#Convert variables to appropriate form
+#mesocosm id and species id as factors
+data$mesocosm_id<-as.factor(data$mesocosm_id)
+data$species<-as.factor(data$species)
+data$treatment<-as.factor(data$treatment)
+
+#biomass and seed weight as numeric
+data$biomass<-as.numeric(data$biomass)
+data$P<-as.numeric(data$P)
+
+#summary of dataset
+summary(data$mesocosm_id) #all mesocosms have four observations
+
+#Create data frames to view species independently
+#view species independently
+data_gaillardia<-data%>%
+  filter(species=="Gaillardia")
+data_taraxacum<-data%>%
+  filter(species=="Taraxacum")
+data_bromus<-data%>%
+  filter(species=="Bromus") 
+data_festuca<-data%>%
+  filter(species=="Festuca")
+
+#By treament
+#197198
+data_197198<-data%>%
+  filter(treatment == "197198")
+#240448
+data_240448<-data%>%
+  filter(treatment == "240448")
+#240720
+data_240720<-data%>%
+  filter(treatment == "240720")
+#control
+data_control<-data%>%
+  filter(treatment == "control")
+
+```
+
+## Visualisation and data exploration
+
+```{r}
+#Histogram of all biomass values
+hist(data$biomass,
+     main = "Histogram of Biomass",
+     xlab = "Biomass (g)")
+#near normal, slightly right skewed
+
+par(mfrow = c(2, 2))  #2 rows, 2 columns
+
+#View histogram by host species
+#generate histogram of data distribution: GAILLARDIA
+hist(data_gaillardia$biomass,
+     main="Histogram",
+     xlab="Biomass (g)")
+#generate histogram of data distribution: FESTUCA
+hist(data_festuca$biomass,
+     main="Histogram",
+     xlab="Biomass (g)")
+
+#generate histogram of data distribution: BROMUS
+hist(data_bromus$biomass,
+     main="Histogram",
+     xlab="Biomass (g)")
+
+#generate histogram of data distribution: TARAXACUM
+hist(data_taraxacum$biomass,
+     main="Histogram",
+     xlab="Biomass (g)")
+
+#Skewed histogram driven by slight differences in species group density centres
+
+par(mfrow = c(1,1))  #return plot view to default
+
+#Create custom function to bootsrap  95% confidence intervals
+mean_cl_boot <- function(x, conf = 0.95, R = 999) {
+  boot_mean <- function(x, i) mean(x[i])
+  boot_out <- boot(x, boot_mean, R = R)
+  ci <- boot.ci(boot_out, type = "perc", conf = conf)$percent[4:5]
+  data.frame(y = mean(x), ymin = ci[1], ymax = ci[2])
+}
+
+#Create species labels for plots
+species_labels <- c(
+  "Bromus"     = expression(italic("B. tectorum")),
+  "Taraxacum"  = expression(italic("T. officinale")),
+  "Festuca"    = expression(italic("F. idahoensis")),
+  "Gaillardia" = expression(italic("G. aristata"))
+)
+
+#Plot biomass by treatment and species (boxplot and bootstrapped mean)
+print(plot_mean_biomass <- ggplot(data, aes(x = treatment, y = biomass, color = species)) +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar",
+               position = position_dodge(0.75), width = 0.2) +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 3,
+               position = position_dodge(0.75)) +
+  labs(title = "Biomass by Treatment and Species",
+       x = "Treatment",
+       y = "Biomass (g)") +
+  coord_cartesian(ylim = c(0, 60)) +
+  scale_colour_brewer(palette = "Dark2") +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black")))
+
+#Biomass by block and by species
+print(biomass_by_block <- ggplot(data, aes(x = block, y = biomass, colour = species)) +
+  geom_jitter(width = 0.2, alpha = 0.7) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  labs(title = "Biomass by Block",
+       x = "Block",
+       y = "Biomass (g)") +
+  theme_minimal())
+
+#Biomass by species
+print(biomass_mean_species <- ggplot(data, aes(x = species, y = biomass, colour = treatment)) +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar",
+               position = position_dodge(0.75), width = 0.2) +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 3,
+               position = position_dodge(0.75)) +
+  labs(color = "AMF isolate",
+       x = "Host Species",
+       y = "Biomass (g)") +
+  scale_colour_brewer(palette = "Dark2") +
+  scale_x_discrete(labels = species_labels) +
+  coord_cartesian(ylim = c(0, 60)) +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black")))
+
+#Interaction plots
+interaction.plot(data$treatment, data$species, data$biomass,
+                 xlab = "Treatment", ylab = "Biomass (g)",
+                 col = 1:length(unique(data$species)),
+                 pch = 1:length(unique(data$species)), type = "b")
+#Slopes are not the same between species, likely interaction between 197198 and 
+#bromus, 240720 and gaillardia
+
+#Flip axis
+interaction.plot(data$species, data$treatment, data$biomass,
+                 xlab = "Species", ylab = "Biomass (g)",
+                 col = 1:length(unique(data$treatment)),
+                 pch = 1:length(unique(data$treatment)), type = "b")
+#Treatments follow roughly equivalent patterns within species (species identity
+#has the strongest effect on biomass), excepting bromus * 197198, 
+#which remains equivalent to the biomass of festuca. 
+```
+
+## Model selection
+
+
+```{r}
+#Start with the simplest model
+#normal distribution with species as the predictor
+normal_species<-glm(biomass~species,
+                    family = gaussian(link="identity"),
+                    data = data)
+summary(normal_species)
+#Check heteroskedasticity
+plot(predict(normal_species), residuals(normal_species, type = "pearson"))
+#Heteroskedastic residual variance
+
+#normal distribution with treatment as the predictor
+normal_treatment<-glm(biomass~treatment,
+                      family = gaussian(link="identity"),
+                      data = data)
+summary(normal_treatment)
+#Check heteroskedasticity
+plot(predict(normal_treatment), residuals(normal_treatment, type = "pearson"))
+#Patterns in residual variance, large residual spread, less hetero. than species
+#only model
+
+#Interaction model
+normal_1<-glm(biomass~treatment*species,
+              family = gaussian(link="identity"),
+              data = data)
+summary(normal_1)
+#Check heteroskedasticity
+plot(predict(normal_1), residuals(normal_1, type = "pearson"))
+#Heteroskedastic residual variance
+#Large y-axis spread and fan shape indicate variance is overdispersed
+#heteroskedastic
+
+#Check spread of variance between treatments and species
+boxplot(residuals(normal_1, type="pearson") ~ interaction(data$treatment,
+                                                          data$species),
+        main = "Boxplot of Residuals per Treatment", 
+        col = "lightblue")
+#Differences in residual variance between treatment*species interactions
+hist(residuals(normal_1))
+#Good histogram shape
+boxplot(residuals(normal_1, type ="pearson")~data$treatment) #Looks good
+boxplot(residuals(normal_1, type = "pearson")~data$species) 
+#Variance between species
+#Check Q-Q residuals
+plot(normal_1, which =2) #Struggles to predict higher values
+#Try a log transformation
+data$log_biomass<-log(data$biomass)
+
+#Model logged biomass with a normal distribution
+log_1<-glm(log_biomass~species*treatment,
+           family=gaussian(link="identity"),
+           data=data)
+summary(log_1)
+#Much better AIC
+#Review residual diagnostics
+res_log<-summary(residuals(log_1, type = "pearson"))
+exp_res<-exp(res_log)
+pred_log<-predict(log_1)
+exp_pred<-exp(pred_log)
+#Low variance in residuals,visually assess
+plot(predict(log_1), residuals(log_1, type = "pearson"))
+#Better residuals, but fan shaped, heteroskedastic residual variance persists
+#Model is likely underdispersed. Residual spread expected between ~ -2 and 2
+#wiht pearson residuals, log model has a spread of ~-0.5 to 0.5. 
+#Check Q-Q residuals
+plot(log_1, which = 2)
+#Model struggles to predict higher values
+#Check histogram of residuals
+hist(residuals(log_1, type = "pearson")) #Compressed residual variance
+
+#Square root transformation
+data$sqrt_biomass<-sqrt(data$biomass)
+
+#Create the histogram
+hist(data$sqrt_biomass) #Looks good
+
+#Create the model
+sqrt_1<-glm(sqrt_biomass~species*treatment,
+            family=gaussian(link="identity"),
+            data=data)
+summary(sqrt_1)
+#Better AIC fit than no transformation, worse than log, 
+#but better dispersion. Underdispserion (dispersion parameter ~0.5) persists 
+#but may be acceptable
+summary(residuals(sqrt_1, type = "pearson")) #Residual spread of pearson
+#residuals expected between -2 and 2 for a normally distributed model, this
+#residual spread looks good
+
+#Plot residuals
+#predict vs. residuals
+plot(predict(sqrt_1), residuals(sqrt_1, type = "pearson"))
+#Looks okay, slightly underdispersed. Persistence of heteroskedastic fan shape.
+#Check histogram
+hist(residuals(sqrt_1, type="pearson"))
+#looks good
+#Check QQplot
+plot(sqrt_1, which =2) #struggles to predict on higher biomass
+
+#Try analysing the data by species to account for heterogeneity of variance
+#Add the sqrt transformation to species groups
+data_gaillardia<-data%>%
+  filter(species=="Gaillardia")
+data_taraxacum<-data%>%
+  filter(species=="Taraxacum")
+data_bromus<-data%>%
+  filter(species=="Bromus") 
+data_festuca<-data%>%
+  filter(species=="Festuca")
+
+#Model diagnostics for each species (sqrt transformed)
+#GAILLARDIA
+sqrt_gai<-glm(sqrt_biomass~treatment,
+              family=gaussian(link="identity"),
+              data=data_gaillardia)
+#Check heteroskedasticity
+plot(predict(sqrt_gai), residuals(sqrt_gai, type = "pearson"))
+#Compressed residual variance
+
+#FESTUCA
+sqrt_fest<-glm(sqrt_biomass~treatment,
+               family=gaussian(link="identity"),
+               data=data_festuca)
+#Check heteroskedasticity
+plot(predict(sqrt_fest), residuals(sqrt_fest, type = "pearson"))
+#Okay
+
+#BROMUS
+sqrt_brom<-glm(sqrt_biomass~treatment,
+               family=gaussian(link="identity"),
+               data=data_bromus)
+#Check heteroskedasticity
+plot(predict(sqrt_brom), residuals(sqrt_brom, type = "pearson"))
+#Okay
+
+#TARAXACUM
+sqrt_tar<-glm(sqrt_biomass~treatment,
+              family=gaussian(link="identity"),
+              data=data_taraxacum)
+#Check heteroskedasticity
+plot(predict(sqrt_tar), residuals(sqrt_tar, type = "pearson"))
+#Compressed residual variance (underdispersed residuals, overfit model)
+
+#Variation within species groups does not allow for all data to be transformed
+#or not trasnfored (i.e. variance is underdispersed when transfmormed
+#for taraxacum and gaillardia)
+
+#Try  a generalised least square (GLS) model that allows variance to differ
+#between species groups
+
+#No variance structure
+gls_no_var <- gls(biomass ~ treatment * species, 
+                  data = data)
+summary(gls_no_var)
+#Check residuals
+plot(predict(gls_no_var), residuals(gls_no_var, type = "pearson"))
+qqnorm(residuals(gls_no_var)); qqline(residuals(gls_no_var))
+hist(residuals(gls_no_var))
+#Heteroskedastic
+
+#additive model
+gls_additive <- gls(biomass ~ treatment + species, 
+                    data = data)
+summary(gls_additive)
+#Check residuals
+plot(predict(gls_additive), residuals(gls_additive, type = "pearson"))
+qqnorm(residuals(gls_additive)); qqline(residuals(gls_additive))
+hist(residuals(gls_additive))
+#Heteroskedastic
+
+#Fit GLS model with species-specific variance structure
+gls_interaction <- gls(biomass ~ treatment * species, 
+                       data = data, 
+                       weights = varIdent(form = ~ 1 | species))
+#Check residuals
+plot(predict(gls_interaction), residuals(gls_interaction, type = "pearson"))
+qqnorm(residuals(gls_interaction)); qqline(residuals(gls_interaction))
+#Struggles to predicat at higher and lower values
+hist(residuals(gls_interaction))
+
+#Good
+summary(gls_interaction)
+
+AIC(gls_no_var)
+AIC(gls_additive) #Worse fit
+AIC(gls_interaction) #Best fit (delta AIC>50)
+
+#Check GLS by species group (simpler models for n=7 sample size)
+#Gaillardia
+gls_gaillardia <- gls(biomass ~ treatment, 
+                      data = data_gaillardia)
+summary(gls_gaillardia)
+#Check residuals
+plot(predict(gls_gaillardia), residuals(gls_gaillardia, type = "pearson"))
+qqnorm(residuals(gls_gaillardia)); qqline(residuals(gls_gaillardia)) #God
+hist(residuals(gls_gaillardia, type = "pearson")) #Okay
+
+#Gaillardia
+lm_gaillardia <- lm(sqrt_biomass ~ treatment, 
+                    data = data_gaillardia)
+summary(lm_gaillardia)
+
+#Check residuals
+plot(predict(lm_gaillardia), residuals(lm_gaillardia, type = "pearson"))
+qqnorm(residuals(lm_gaillardia)); qqline(residuals(lm_gaillardia)) #God
+hist(residuals(lm_gaillardia, type = "pearson"))
+#GLS is a better it for gaillardia based on residual diagnostics
+
+#FESTUCA
+gls_festuca<- gls(biomass ~ treatment, 
+                  data = data_festuca)
+summary(gls_festuca)
+#Check residuals
+plot(predict(gls_festuca), residuals(gls_festuca, type = "pearson"))
+qqnorm(residuals(gls_festuca)); qqline(residuals(gls_festuca)) #okay
+hist(residuals(gls_festuca, type = "pearson")) #Okay, slight left tail
+
+#Without block effect
+lm_festuca <- lm(sqrt_biomass ~ treatment, 
+                 data = data_festuca)
+summary(lm_festuca)
+
+#Check residuals
+plot(predict(lm_festuca), residuals(lm_festuca, type = "pearson"))
+qqnorm(residuals(lm_festuca)); qqline(residuals(lm_festuca)) #okay
+hist(residuals(lm_festuca, type = "pearson"))
+#GLS is a better fit for festuca based on residual diagnostics
+
+#BROMUS
+gls_bromus<- gls(biomass ~ treatment, 
+                 data = data_bromus)
+summary(gls_bromus)
+#check residuals
+plot(predict(gls_bromus), residuals(gls_bromus, type = "pearson")) #Okay residual
+#spread
+qqnorm(residuals(gls_bromus)); qqline(residuals(gls_bromus)) #okay
+hist(residuals(gls_bromus, type="pearson")) #Okay
+#residuals still centered around 0
+
+lm_bromus <- lm(sqrt_biomass ~ treatment, 
+                data = data_bromus)
+summary(lm_bromus)
+
+#Check residuals
+plot(predict(lm_bromus), residuals(lm_bromus, type = "pearson"))
+qqnorm(residuals(lm_bromus)); qqline(residuals(lm_bromus)) #meh
+hist(residuals(lm_bromus, type = "pearson")) #Does not fit expected distribution, bimodal
+
+#GLS is a better fit based on residual diagnostics
+
+#TARAXACUM
+gls_taraxacum <- gls(biomass ~ treatment, 
+                     data = data_taraxacum)
+summary(gls_taraxacum)
+#Check residuals
+plot(predict(gls_taraxacum), residuals(gls_taraxacum, type = "pearson"))
+#Okay, possible heteroskedasticity
+qqnorm(residuals(gls_taraxacum)); qqline(residuals(gls_taraxacum)) #okay
+hist(residuals(gls_taraxacum, type = "pearson")) #Resdiusal centered around 0
+#okay
+lm_taraxacum <- lm(sqrt_biomass ~ treatment, 
+                   data = data_taraxacum)
+summary(lm_taraxacum)
+#Check residuals
+plot(predict(lm_taraxacum), residuals(lm_taraxacum, type = "pearson"))
+qqnorm(residuals(lm_taraxacum)); qqline(residuals(lm_taraxacum)) #okay
+hist(residuals(lm_taraxacum, type = "pearson"))  
+#GLS is a better fit than lm models based on residual diagnostics
+
+```
+
+## Extract estimated marginal means
+
+```{r}
+#Compute estimated marginal means
+#infer = (c(TRUE,FALSE)) includes confidence intervals, excludes 
+#p vlaues testing significant difference form 0
+#Gaillardia
+emm_gaillardia <- emmeans(gls_gaillardia, ~ treatment, mode = "df.error")
+summary(emm_gaillardia)
+pairs(emm_gaillardia, adjust = "tukey")
+#Festuca
+emm_festuca <- emmeans(gls_festuca, ~ treatment, mode = "df.error")
+summary(emm_festuca)
+pairs(emm_festuca, adjust = "tukey")
+#Bromus
+emm_bromus <- emmeans(gls_bromus, ~ treatment, mode = "df.error")
+summary(emm_bromus)
+pairs(emm_bromus, adjust = "tukey")
+# Taraxacum
+emm_taraxacum <- emmeans(gls_taraxacum, ~ treatment, mode = "df.error")
+summary(emm_taraxacum)
+pairs(emm_taraxacum, adjust = "tukey")
+```
+
+## Total phosphorous analysis (exploration and model selection)
+
+```{r}
+#Convert % P to toal P per species
+data$total_P<-data$P*data$biomass
+str(data$biomass)
+
+#Add total phosphorous to the species datasets
+data_gaillardia<-data%>%
+  filter(species=="Gaillardia")
+data_taraxacum<-data%>%
+  filter(species=="Taraxacum")
+data_bromus<-data%>%
+  filter(species=="Bromus") 
+data_festuca<-data%>%
+  filter(species=="Festuca")
+
+#Histogram of P distribution
+hist(data$total_P) #near approximation of a normal distribtuion. May be bimodal
+
+#Visualise total P within species groups/treatment
+print(total_P_median_species <- ggplot(data, 
+                                       aes(x = species, 
+                                           y = total_P,
+                                           fill = treatment)) +
+        # Boxplot per species × treatment
+        geom_boxplot(position = position_dodge(width = 0.75), 
+                     width = 0.6, alpha = 0.8,
+                     outlier.shape = NA) +  # Hide default outlier points
+        labs(title = "Total P by Species and Treatment",
+             x = "Species",
+             y = "Total P (g)") +
+        scale_fill_brewer(palette = "Dark2") +
+        scale_colour_brewer(palette = "Dark2") +
+        scale_x_discrete(labels = species_labels) +  
+        theme_minimal() +
+        theme(
+          panel.grid = element_blank(),
+          axis.line = element_line(color = "black"),
+          axis.ticks = element_line(color = "black")
+        ))
+
+#Median
+print(total_P_median<-ggplot(data, aes(x = treatment, y = total_P, fill = species)) +
+        geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+        geom_jitter(width = 0.2, alpha = 0.7, color = "black") +
+        labs(title = "Gaillardia Phosphorus by Treatment",
+             x = "Treatment",
+             y ="Phosphorus (% total foliar biomass)") +
+        labs(title = "P by Species and Treatment",
+             x = "Treatment",
+             y = "% P") +
+        scale_colour_brewer(palette = "Dark2") +
+        scale_x_discrete(labels = species_labels) +  
+        theme_minimal() +
+        theme(
+          panel.grid = element_blank(),               #Removes all grid lines
+          axis.line = element_line(color = "black"),  #Adds black x and y axis lines
+          axis.ticks = element_line(color = "black")  #show tick marks
+        ))
+
+#Median with individual points by species group
+#GAILLARDIA
+print(total_P_gaillardia<-ggplot(data_gaillardia, aes(x = treatment, y = total_P,)) +
+        geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+        geom_jitter(width = 0.2, alpha = 0.7, color = "black") +
+        labs(title = "Gaillardia Phosphorus by Treatment",
+             x = "Treatment",
+             y ="Phosphorus (% total foliar biomass)") +
+        scale_y_continuous(limits = c(0,8))+
+        theme_minimal() + 
+        theme(panel.grid.minor = element_blank()))
+
+#FESTUCA
+print(total_P_festuca<-ggplot(data_festuca, aes(x = treatment, y = total_P,)) +
+        geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+        geom_jitter(width = 0.2, alpha = 0.7, color = "black") +
+        labs(title = "Festuca Phosphorous by Treatment",
+             x = "Treatment",
+             y ="Phosphorus (% total foliar biomass)") +
+        scale_y_continuous(limits = c(0,8))+
+        theme_minimal() + 
+        theme(panel.grid.minor = element_blank()))
+
+#BROMUS
+print(total_P_bromus<-ggplot(data_bromus, aes(x = treatment, y = total_P,)) +
+        geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+        geom_jitter(width = 0.2, alpha = 0.7, color = "black") +
+        labs(title = "Bromus Phosphorous by Treatment",
+             x = "Treatment",
+             y ="Phosphorus (% total foliar biomass)") +
+        scale_y_continuous(limits = c(0,12
+        )) +
+        theme_minimal() + 
+        theme(panel.grid.minor = element_blank()))
+
+#TARAXACUM
+print(total_P_taraxacum<-ggplot(data_taraxacum, aes(x = treatment, y = total_P,)) +
+        geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+        geom_jitter(width = 0.2, alpha = 0.7, color = "black") +
+        labs(title = "Taraxacum Phosphorous by Treatment",
+             x = "Treatment",
+             y ="Phosphorus (% total tissue biomass)") +
+        scale_y_continuous(limits = c(0,8)) +
+        theme_minimal() + 
+        theme(panel.grid.minor = element_blank()))
+
+#Arrange species plots together in a single figure (mean)
+multi_figure_total_P <- ggarrange(total_P_bromus, total_P_festuca,
+                                  total_P_gaillardia, total_P_taraxacum,
+                                  ncol = 2, nrow = 2,
+                                  labels = c("a", "b", "c", "d"))
+
+#Display the combined figure
+print(multi_figure_total_P)
+
+################################################################################
+#MODEL SELECTION: Total P
+################################################################################
+
+#Start with the simplest model
+#fit of a normal distibrution
+normal_total_P<-glm(P~treatment*species,
+                    family=gaussian(link="identity"),
+                    data=data)
+summary(normal_total_P)
+#Residual diagnostics
+#Fitted vs. residuals
+plot(fitted(normal_total_P), residuals(normal_total_P, type = "pearson")) 
+#some heteroskedasticity
+#qqplot
+plot(normal_total_P, which =2) #Looks good
+#Residuals by factor level
+plot(normal_total_P, which =5) #Looks good, decrease in residual variance
+#within control
+#Check variance between groups
+boxplot(total_P~interaction(treatment,species),
+        data=data)
+
+#There are difference in variation between species and within treatment groups, 
+#try accounting for variance structure. There are only 3 observations/group, 
+#modelling a variance structure is too complex for the number
+#of observations. Use Welch's ANOVA (rstatix package) to account for group 
+#variance. Welch's ANOVA must be run on each species group independently as it 
+#does not account for interactions. Games-Howell (rstatix package) is the posthoc test for Welch's ANOVA. It internally adjusts for multiple testing, 
+#https://search.r-project.org/CRAN/refmans/rstatix/html/games_howell_test.html
+
+#GAILLARDIA
+print(gaillardia_welch_P<-oneway.test(total_P ~ treatment, data = data_gaillardia, 
+                                      var.equal = FALSE) )
+#Not significant
+
+#FESTUCA
+#Run Welch's one way comparisons (to account for variance between groups)
+print(festuca_welch_P<-oneway.test(total_P ~ treatment, data = data_festuca, 
+                                   var.equal = FALSE) )
+#Not significant
+
+#TARAXACUM
+#Run Welch's one way comparisons (to account for variance between groups)
+print(taraxacum_welch_P<-oneway.test(total_P ~ treatment, data = data_taraxacum, 
+                                     var.equal = FALSE) )
+#Not significant
+
+#BROMUS
+#Run Welch's one way comparisons (to account for variance between groups)
+print(bromus_welch_P<-oneway.test(total_P ~ treatment, data = data_bromus, 
+                                  var.equal = FALSE) )
+#Not significant
+```
+
+## Seed production data
+
+```{r}
+#Can not statistically compare seed weight or seed head count, visualise.
+#Create a new dataframe that subset the treatments
+#Add seed coutn data
+data$seed_count<-data$seed_weight>0
+data$seed_count<-as.numeric(data$seed_count)
+
+#Do descriptive statistics and show plots of seed weight
+#Summarize seed count
+seed_summary <- data %>%
+  group_by(species, treatment) %>%
+  summarize(total_seed_count = sum(seed_count, na.rm = TRUE), .groups = "drop")
+
+#Plot 
+seed_count<-ggplot(seed_summary, aes(x = species, y = total_seed_count, fill = treatment)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.6, alpha = 0.8) +
+  labs(title = "Count of Hosts That Produced Seeds",
+       x = "Species",
+       y = "Number of Hosts that Produced Seed Heads") +
+  scale_y_continuous(limits = c(0, 5), expand = c(0, 0)) +                   # Removes space on x-axis
+  scale_fill_brewer(palette = "Dark2") +
+  scale_x_discrete(labels = species_labels) +  
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  )
+print(seed_count)
+
+#View seed ocunt by mesocosm
+#Summarize seed count
+seed_summary <- data %>%
+  group_by(species, treatment, mesocosm_id) %>%
+  summarize(total_seed_count = sum(seed_count, na.rm = TRUE), .groups = "drop")
+
+#Plot 
+seed_count_meso<-ggplot(seed_summary, aes(x = mesocosm_id, y = total_seed_count, 
+                                          fill = species)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.6, alpha = 0.8) +
+  labs(title = "Count of Hosts That Produced Seeds",
+       x = "Mesocosm id",
+       y = "Number of Hosts that Produced Seed Heads") +
+  scale_y_continuous(limits = c(0, 5), expand = c(0, 0)) +                   # Removes space on x-axis
+  scale_fill_brewer(palette = "Dark2") +
+  scale_x_discrete(labels = species_labels) +  
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  )
+print(seed_count_meso)
+
+#Alternative reasons variation in seed production could be observed:
+#Not enough growing time
+#Nested within mesocosms (mesocosm specific)
+```
