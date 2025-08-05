@@ -1,0 +1,1006 @@
+---
+title: "RQ1 Analysis and Visuals"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+date: "2025-08-04"
+---
+
+```{r setup, include=TRUE}
+#Load in all packages
+library(readxl)
+library(nlme)
+library(lme4)
+library(DAAG)
+library(ggplot2)
+library(dplyr)
+library(MuMIn)
+library(car)
+library(viridis)
+library(DHARMa)
+library(FSA)
+library(emmeans)
+library(ggpubr)
+library(rstatix)
+library(glmmTMB)
+library(boot)
+library(lmPerm)
+
+```
+
+## Import the datasets and convert abundance to copies per gram
+
+```{r}
+#Import the dataset
+data <- read.csv(file.path(
+  "C:/Users/Joyalea/Documents/UBCO/Thesis",
+  "Final_Files",
+  "RQ1_AMFAbundance",
+  "RQ1_results_cleaned_ddPCR.csv"
+))
+
+#Review data import
+head(data)
+str(data)
+tail(data)
+
+#Add treatment group and growing block
+data <- data %>%
+  mutate(treatment = ifelse(mesocosm_id %in% c(1:7), "Control",
+                            ifelse(mesocosm_id %in% c(8:14), "197198",
+                                   ifelse(mesocosm_id %in% c(15:21), "240448",
+                            ifelse(mesocosm_id %in% c(22:28), "240720", NA)))),
+         block = ifelse(mesocosm_id %in% c(15, 20, 22, 12, 11, 14, 24, 27, 
+                                           19, 21, 25, 3, 2, 7), "A",
+                        ifelse(mesocosm_id %in% c(4, 17, 9, 28, 6, 1, 5, 18, 8, 
+                                                26, 16, 23, 13, 10), "B", NA)))
+
+View(data)
+data$mesocosm_id<-as.character(data$mesocosm_id)
+
+#Add dilution factors of the variance mesocosms
+#Read in the file
+dilution_df <- read_excel(file.path(
+  "C:/Users/Joyalea/Documents/UBCO/Thesis",
+  "Final_Files",
+  "RQ1_AMFAbundance",
+  "Variance_DilutionFactors_M24_M25.xlsx"
+))
+
+colnames(dilution_df)
+
+#Clean and rename columns
+dilution_df <-  dilution_df %>% mutate(
+    mesocosm_id = as.character(mesocosm_id),  
+    species = as.factor(species)
+  ) %>%
+  select(species, mesocosm_id, dilution_factor)
+
+#Merge dilution df into main dataset and apply dilution correction
+data <- data %>%
+  left_join(dilution_df, by = c("species", "mesocosm_id"))
+
+#Check the merge was successful
+data %>%
+  filter(mesocosm_id %in% c("24", "25")) %>%
+  select(species, mesocosm_id, dilution_factor)
+
+#Add elution volume (30uL * 9 = 270uL variance mesocosms; 3000uL main analysis)
+data <- data %>%
+  mutate(elution_volume = ifelse(mesocosm_id %in% c("24", "25"), 270, 3000))
+
+#Add root mass to the dataset
+data <- data %>%
+  mutate(root_mass = case_when(
+    mesocosm_id %in% c("24", "25") & species %in% c("Bromus", "Festuca") ~ 0.9,
+    mesocosm_id %in% c("24", "25") & species %in% c("Gaillardia", "Taraxacum") ~ 1.8,
+    TRUE ~ 1.5
+  ))
+
+#Calculate total copies accounting for elution volume and dilution factor
+data <- data %>%
+  mutate(
+    total_copies = case_when(
+      mesocosm_id %in% c("24", "25") ~ copies_rxn * dilution_factor * (elution_volume / 3),
+      TRUE ~ copies_rxn * (elution_volume / 3)
+    )
+  )
+
+#Calculate copies_g based on total copies (total copies/root mass extracted from)
+data <- data %>%
+  mutate(copies_g = total_copies / root_mass)
+
+#Check steps were performed correctly
+data %>%
+  filter(mesocosm_id %in% c("24", "25")) %>%
+  select(species, mesocosm_id, copies_rxn, dilution_factor, 
+         elution_volume, root_mass, total_copies, copies_g)
+#looks good
+
+#Convert treatment to a factor and copies per gram to numeric
+data$treatment<-as.factor(data$treatment)
+#Copies/g is numeric
+data$copies_g<-as.numeric(data$copies_g)
+
+#summary of dataset
+summary(data$mesocosm_id) #all mesocosms have four observations
+
+#Create data frames to view species independently
+#view species independently
+data_gaillardia<-data%>%
+  filter(species=="Gaillardia")
+data_taraxacum<-data%>%
+  filter(species=="Taraxacum")
+data_bromus<-data%>%
+  filter(species=="Bromus") 
+data_festuca<-data%>%
+  filter(species=="Festuca")
+
+#Create data frames to view treatments independently
+#197198
+data_197198<-data%>%
+  filter(treatment == "197198")
+#240448
+data_240448<-data%>%
+  filter(treatment == "240448")
+#240720
+data_240720<-data%>%
+  filter(treatment == "240720")
+```
+
+## Data visualisation
+
+```{r pressure, echo=TRUE}
+#Create a new data frame named 'SUBSET' (remove control group)
+SUBSET<-data%>%
+  filter(treatment != "Control")
+
+#Drop level "control"
+SUBSET <- SUBSET %>% mutate(treatment = droplevels(treatment))
+
+#Confirm contorl was removed
+str(SUBSET)
+
+#Check for outliers
+range(SUBSET$copies_g)
+median(SUBSET$copies_g)
+245080/12100
+
+#One plant has unusually high abundance (>20X median abundance)
+#SUBSET<-SUBSET%>%
+ # filter(copies_g<=400) #Remove outlier temporarily
+#summary(SUBSET)
+
+#Check histogram shape
+hist(SUBSET$copies_g) #Likely zero inflated
+
+#AMF abundance data (ddPCR) is notoriously zero heavy, check zero cout
+#Proportion of zeros
+print(SUBSET%>%count(copies_g==0)) #20
+
+SUBSET <- SUBSET %>%
+  mutate(presence = ifelse(copies_g > 0, 1, 0))
+
+#Plot presence by mescososm
+presence_mesocosm<-ggplot(SUBSET, aes(x = mesocosm_id, y = species, fill = factor(presence))) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  scale_fill_manual(values = c("0" = "grey90", "1" = "forestgreen"),
+                    name = "AMF Presence", labels = c("Absent", "Present")) +
+  labs(
+    title = "AMF Isolate Presence (copies_g > 0)",
+    x = "Mesocosm ID",
+    y = "Host Species"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+print(presence_mesocosm)
+
+#Compare each species independently to see if each group follows the same 
+#distribution
+
+#view species independently
+subset_gaillardia<-SUBSET%>%
+  filter(species=="Gaillardia")
+subset_taraxacum<-SUBSET%>%
+  filter(species=="Taraxacum")
+subset_bromus<-SUBSET%>%
+  filter(species=="Bromus") 
+subset_festuca<-SUBSET%>%
+  filter(species=="Festuca")
+
+#Compare to variance mesocosms
+subset_festuca %>%
+  filter(mesocosm_id %in% c(24)) %>%
+  summarise(mean_copies = mean(copies_g, na.rm = TRUE))
+
+#By treament
+#197198
+subset_197198<-SUBSET%>%
+  filter(treatment == "197198")
+#240448
+subset_240448<-SUBSET%>%
+  filter(treatment == "240448")
+#240720
+subset_240720<-SUBSET%>%
+  filter(treatment == "240720")
+
+par(mfrow = c(2, 2))
+
+#View distirbtuion of gorups 
+#GAILLARDIA
+hist(subset_gaillardia$copies_g)
+#FESTUCA
+hist(subset_festuca$copies_g) #non linear??
+#TARAXACUM
+hist(subset_taraxacum$copies_g)
+#BROMUS
+hist(subset_bromus$copies_g)
+#Roughly similiar distributions
+
+#BY TREATMENT
+#197198
+hist(subset_197198$copies_g)
+#240448
+hist(subset_240448$copies_g)
+#240720
+hist(subset_240720$copies_g)
+#all have a right skewed distribution with a spike at small values/zero. 
+#DAOM240720 spikes at zero and 600,000
+par(mfrow = c(1, 1))
+
+#Create species labels for plots
+species_labels <- c(
+  "Bromus"     = expression(italic("B. tectorum")),
+  "Taraxacum"  = expression(italic("T. officinale")),
+  "Festuca"    = expression(italic("F. idahoensis")),
+  "Gaillardia" = expression(italic("G. aristata"))
+)
+
+#Plot copies/g as a response to treatment and species, Line represents median,
+#Boxes show the interquartile range -- 25 percentile and 75 percentile of the 
+#data. Line represents the center of the data
+print(plot_copies <- ggplot(SUBSET, aes(x = species, y = copies_g, 
+                                        color = treatment)) +
+        scale_x_discrete(labels = species_labels) +
+        geom_boxplot(alpha = 0.5, outlier.shape = NA) +  
+        labs(
+          title = "Copies per gram by Treatment and Species",
+          x = "Host Species",
+          y = "Copies of mat-loci gene per gram of host root",
+          color = "AMF isolate treatment"  # custom legend title
+        ) +
+        theme_minimal() +
+        theme(
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.line = element_line(color = "black"),
+          axis.ticks = element_line(color = "black")
+        ))
+
+#197198 establishment consistent across species HOWEVER variation in 197*brom
+#240448 establishment highest in taraxacum and gaillardia, most variation in Tar.
+#240720 consistently low across species
+#Spike in 240448 in gaillardia and taraxacum
+#Visual eterogeneity of variance between treatment and species
+
+#Plot as a response to block
+print(plot_copies<-ggplot(SUBSET, aes(x = block, y = copies_g, color = treatment)) +
+        #geom_jitter(width = 0.2, alpha = 0.7) + #add individual observations
+        geom_boxplot(alpha = 0.5, outlier.shape = NA) +  #boxplot
+        labs(title = "Copies per gram by Treatment and Species",
+             x = "Block",
+             y = "Copies of Mat-loci gene / gram of host root") +
+        theme_minimal())
+#No notable differences
+
+#Mean
+print(plot_copies_mean <- ggplot(SUBSET, aes(x = species, y = copies_g, 
+                                             color = treatment)) +
+        stat_summary(fun.data = mean_cl_boot, geom = "errorbar", 
+                     position = position_dodge(width = 0.6), width = 0.2) +
+        stat_summary(fun = mean, geom = "point", shape = 18, size = 3, 
+                     position = position_dodge(width = 0.6)) +
+        scale_x_discrete(labels = species_labels) +  
+        labs(title = "Copies per gram by Treatment and Species",
+             x = "Species",
+             y = "Copies of mat-loci gene per gram of host root") +
+        theme_minimal() +
+        theme(
+          panel.grid.major = element_blank(),  
+          panel.grid.minor = element_blank(),  
+          panel.border = element_blank(),     
+          axis.line = element_line(color = "black"),  
+          axis.ticks = element_line(color = "black")
+        ))
+
+#Mean with treatment
+print(plot_copies_mean_treatment <- ggplot(SUBSET, aes(x = treatment, y = copies_g, 
+                                                       color = species)) +
+        stat_summary(fun.data = mean_cl_boot, geom = "errorbar", 
+                     position = position_dodge(width = 0.6), width = 0.2) +
+        stat_summary(fun = mean, geom = "point", shape = 18, size = 3, 
+                     position = position_dodge(width = 0.6)) +
+        scale_color_discrete(labels = c(
+          "Gaillardia" = expression(italic("G. aristata")),
+          "Taraxacum"  = expression(italic("T. officinale")),
+          "Bromus"     = expression(italic("B. tectorum")),
+          "Festuca"    = expression(italic("F. idahoensis"))
+        )) +
+        labs(title = "Copies per 20 uL by Treatment and Species",
+             x = "Treatment",
+             y = "Copies of Mat-loci gene / gram of host root",
+             color = "Species") +
+        theme_minimal() +
+        theme(
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.line = element_line(color = "black"),
+          axis.ticks = element_line(color = "black")
+        ))
+
+#View each species independently
+#GAILLARDIA
+print(copies_gaillardia<-ggplot(subset_gaillardia, aes(x = treatment, y = copies_g)) +
+        geom_jitter(width = 0.2, alpha = 0.7) +  #jitter 
+        geom_boxplot(alpha = 0.5, outlier.shape = NA) +  
+        labs(title = "Gaillardia",
+             x = "Treatment",
+             y = "Copies / 20 uL") +
+        theme_minimal())
+#Uptick in establishment in 240448, larger variance spread
+#mean
+print(copies_gaillardia_mean <- ggplot(subset_gaillardia, aes(x = treatment, 
+                                                              y = copies_g)) +
+        stat_summary(fun.data = mean_cl_boot, geom = "errorbar", 
+                     position = position_dodge(width = 0.6), width = 0.2) +
+        stat_summary(fun = mean, geom = "point", shape = 18, size = 3, 
+                     position = position_dodge(width = 0.6)) +
+        labs(title = "Gaillardia",
+             x = "Treatment",
+             y = "Copies of mat-loci gene / gram of host root") +
+        #scale_y_continuous(limits = c(0, 250000), breaks = seq(0, 250, by = 50)) +
+        theme_minimal() +
+        theme(panel.grid.minor = element_blank()))
+
+#FESTUCA
+print(copies_festuca<-ggplot(subset_festuca, aes(x = treatment, y = copies_g)) +
+        geom_jitter(width = 0.2, alpha = 0.7) + 
+        geom_boxplot(alpha = 0.5, outlier.shape = NA) + 
+        labs(title = "Festuca",
+             x = "Treatment",
+             y = "Copies of mat-loci gene / gram of host root") +
+        theme_minimal())
+#mean
+print(copies_festuca_mean <- ggplot(subset_festuca, aes(x = treatment, 
+                                                        y = copies_g)) +
+        stat_summary(fun.data = mean_cl_boot, geom = "errorbar", 
+                     position = position_dodge(width = 0.6), width = 0.2) +
+        stat_summary(fun = mean, geom = "point", shape = 18, size = 3, 
+                     position = position_dodge(width = 0.6)) +
+        labs(title = "Festuca",
+             x = "Treatment",
+             y = "Copies of Mat-loci gene / gram of host root") +
+    #scale_y_continuous(limits = c(0, 100000), breaks = seq(0, 250, by = 50)) +
+        theme_minimal() +
+        theme(panel.grid.minor = element_blank()))
+
+#BROMUS
+print(copies_bromus<-ggplot(subset_bromus, aes(x = treatment, y = copies_g)) +
+        geom_jitter(width = 0.2, alpha = 0.7) + 
+        geom_boxplot(alpha = 0.5, outlier.shape = NA) + 
+        labs(title = "Bromus",
+             x = "Treatment",
+             y = "Copies of Mat-loci gene / gram of host root") +
+        theme_minimal())
+#mean
+print(copies_bromus_mean <- ggplot(subset_bromus, aes(x = treatment, 
+                                                      y = copies_g)) +
+        stat_summary(fun.data = mean_cl_boot, geom = "errorbar", 
+                     position = position_dodge(width = 0.6), width = 0.2) +
+        stat_summary(fun = mean, geom = "point", shape = 18, size = 3, 
+                     position = position_dodge(width = 0.6)) +
+        labs(title = "Bromus",
+             x = "Treatment",
+             y = "Copies of Mat-loci gene / gram of host root") +
+       # scale_y_continuous(limits = c(0, 200), breaks = seq(0, 250, by = 50)) +
+        theme_minimal() +
+        theme(panel.grid.minor = element_blank()))
+
+#TARAXACUM
+print(copies_taraxacum<-ggplot(subset_taraxacum, aes(x = treatment, y = copies_g)) +
+        geom_jitter(width = 0.2, alpha = 0.7) +  
+        geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+        labs(title = "Taraxacum",
+             x = "Treatment",
+             y = "Copies of Mat-loci gene / gram of host root") +
+        theme_minimal())
+#mean
+print(copies_taraxacum_mean <- ggplot(subset_taraxacum, aes(x = treatment, 
+                                                            y = copies_g)) +
+        stat_summary(fun.data = mean_cl_boot, geom = "errorbar", 
+                     position = position_dodge(width = 0.6), width = 0.2) +
+        stat_summary(fun = mean, geom = "point", shape = 18, size = 3, 
+                     position = position_dodge(width = 0.6)) +
+        labs(title = "Taraxacum",
+             x = "Treatment",
+             y = "Copies of Mat-loci gene / gram of host root") +
+       # scale_y_continuous(limits = c(0, 250), breaks = seq(0, 250, by = 50)) +
+        theme_minimal() +
+        theme(panel.grid.minor = element_blank()))
+
+#Arrange median plots together
+#Arange plots together in a single figure
+multi_figure_copies <- ggarrange(copies_bromus, copies_festuca,
+                                 copies_gaillardia, copies_taraxacum,
+                                 ncol = 2, nrow = 2,
+                                 labels = c("a", "b", "c", "d"))
+
+#Display the combined figure. NOTE DIFFERENT Y AXIS VALUES!
+print(multi_figure_copies)
+#240448 is consistently high across all host species, excepting bromus 197198
+
+#Arange mean plots together in a single figure
+multi_copies_mean <- ggarrange(copies_bromus_mean, copies_festuca_mean,
+                               copies_gaillardia_mean, copies_taraxacum_mean,
+                               ncol = 2, nrow = 2,
+                               labels = c("a", "b", "c", "d"))
+print(multi_copies_mean)
+
+#Create interaction plots
+#Plot inoculation*hostID
+interaction.plot(SUBSET$treatment, SUBSET$species, SUBSET$copies_g,
+                 xlab= "treatment",
+                 ylab= "Copies of Mat-loci gene / gram of host root",
+                 legend= TRUE,
+                 col= 1:length(unique(SUBSET$species)),
+                 pch= 1:length(unique(SUBSET$species)),
+                 type= "b")
+#The slope is a similiar shape acroos treatment*species, excepting 197198 whereas
+#abundance does not increase in 240448 relative to 197198. This suggests a 
+#197198*bromus interaction that changes the direction of effect.
+#240448 abundance appears to increase most in taraxacum (steepest slope),
+#suggesting a possible interaction between Taraxacum*240448.
+
+#Flip plot
+interaction.plot(SUBSET$species, SUBSET$treatment, SUBSET$copies_g,
+                 xlab= "treatment",
+                 ylab= "Copies of Mat-loci gene / gram of host root",
+                 legend= TRUE,
+                 col= 1:length(unique(data$species)),
+                 pch= 1:length(unique(data$species)),
+                 type= "b")
+#240720 stays consistently low, 240448 spikes in gaillardia and taraxacum.
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+```
+
+## Model Selection
+
+```{r}
+#Start with the simplest models
+#Normal distribution
+#No interaction
+normal_no_int<-glm(copies_g~treatment+species,
+                   family=gaussian(link="identity"),
+                   data=SUBSET)
+summary(normal_no_int) #overdipsersed
+plot(fitted(normal_no_int), residuals(normal_no_int, type= "pearson"))
+#Awful, floor like pattern,
+#heteroskedastic fan spread
+
+#Look at residuals of a normal distibrution with an interaction term
+#INTERACTION
+normal_interaction<-glm(copies_g~treatment*species,
+                        family=gaussian(link="identity"),
+                        data=SUBSET)
+summary(normal_interaction) #overdispersed
+plot(fitted(normal_interaction), residuals(normal_interaction, type = "pearson"))
+#Still poor, heteroskedasti fan shape, floor pattern less pronounced
+
+#View residuals with each predictor
+plot(SUBSET$treatment, residuals(normal_interaction, type="pearson"))
+#240720 has a much smaller residual range
+#Festuca has a much smaller residual range than all others. Gaillardia range is
+#smaller than bromus and festuca. Residual variance is varied across species.
+
+#View each species and treatment independently to assess where the 
+#heteroskedasticity and floor like pattern (assumed zeroes) arises  -- 
+#which components drive the heteorskedasticity and overdispersion?
+
+#GAILLARDIA
+normal_copies_gai<-glm(copies_g~treatment,
+                       family=gaussian(link="identity"),
+                       data=subset_gaillardia)
+summary(normal_copies_gai)
+plot(fitted(normal_copies_gai), residuals(normal_copies_gai, type = "pearson"))
+#Heteroskedastic and over dispersed
+
+#FESTUCA
+normal_copies_fest<-glm(copies_g~treatment,
+                        family=gaussian(link="identity"),
+                        data=subset_festuca)
+summary(normal_copies_fest)
+plot(fitted(normal_copies_fest), residuals(normal_copies_fest, type = "pearson"))
+#heteroskedastic and overdispersed, less residual dispersion than gaillardia
+
+#BROMUS
+normal_copies_brom<-glm(copies_g~treatment,
+                        family=gaussian(link="identity"),
+                        data=subset_bromus)
+summary(normal_copies_brom)
+plot(fitted(normal_copies_brom), residuals(normal_copies_brom, type = "pearson"))
+#Very heteroskedastic and overdispersed, no fitted values between 5 and 50
+
+#TARAXACUM
+normal_copies_tar<-glm(copies_g~treatment,
+                       family=gaussian(link="identity"),
+                       data=subset_taraxacum)
+summary(normal_copies_tar)
+plot(fitted(normal_copies_tar), residuals(normal_copies_tar, type = "pearson"))
+#Heteroskedastic and overdispersed, no fitted values between 50 and 170
+
+## Review zero counts between groups
+#Variation in zeroes between groups may be driving floor like pattern and
+#heteroskedasticity. Visually assess zero counts in species groups and
+#treatment groups.
+#Visualise zero counts between species
+ggplot(SUBSET, aes(x = species, y = copies_g)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, aes(color = copies_g == 0)) +
+  theme_minimal() +
+  labs(x = "Species", y = "Copies of Mat-loci gene / gram of host root") 
+
+#Count the # of zeroes between species
+#Count the number of zeros per mesocosm
+print(zero_count_species <- SUBSET %>%
+        group_by(species) %>%  
+        summarise(zero_count = sum(copies_g == 0)) %>%
+        ungroup())
+
+#The number of zeroes varies between groups: Gaillardia (n=1), Bromus (n=3),
+#Taraxacum (n=4) and Festuca (n=9). 
+
+#Count the number of zeroes between treatments
+print(zero_count_treatment <- SUBSET %>%
+        group_by(treatment) %>%  
+        summarise(zero_count = sum(copies_g == 0)) %>%
+        ungroup())
+#Zeroes present in 197198 (n=6) and 240720 (n=14), but not in 240448 (n=0). 
+
+#Visually check for possible correlation between mesocosm_id and zero count
+ggplot(SUBSET, aes(x = mesocosm_id, y = copies_g)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, aes(color = factor(copies_g == 0)), size = 2, 
+              alpha = 0.6) +
+  labs(x = "Mesocosm ID", y = "Copies of Mat-loci gene / gram of host root",
+       color = "Mesocosm ID") +
+  theme_minimal()
+
+#Count the number of zeros per mesocosm
+zero_count_mesocosm <- SUBSET %>%
+  group_by(mesocosm_id) %>%  
+  summarise(zero_count = sum(copies_g == 0)) %>%
+  ungroup()
+print(zero_count_mesocosm, n=Inf)
+#All mesocosms have at least 1 non-zero observation (isolate established in meso)
+```
+
+### Summary of zero inflation and heterogeneity of variance
+
+Zero inflation present within the Festuca species group (9/21 observations) and within the treatment group 240720 (14/21 observations). However other subgroups 
+have few or no zeroes present (gaillardia = 1 zero; 240448 = no zeroes). As zero inflated models require some zeroes present to estimate maximum likelihood, 
+low zero counts in both species and treatment subgroups suggests a zero inflated model is not an appropriate fit.
+
+### Summary of heterogeneity of variance:
+240448 had larger variance spread than 240720 and 197198. 197198 and 240448 
+possess a outliers that may be challenge model fit, however, the outliers are well within biological range and were retained.
+
+## Continue model construction
+Try a tweedie model to test if a tweedie dsitibution (power parameter between
+1 and 2) reflects the variation in dsitibrution shapes. Tweedie models
+incorporate zeroes by assuming that zeroes eoccur within the distribrution
+(i.e. they do not arise as a seperate process).
+
+```{r}
+#Estimate power parameter of the interaction to check tweedie distribution
+#is approporiate (p.p. should be between 1 == poisson-like and 2 == gamma-like)
+#Estimate power parameter of the interaction
+p_est_interaction <- tweedie::tweedie.profile(copies_g ~ treatment*species,
+                                              p.vec = seq(1.1, 1.9, by = 0.1), 
+                                              method = "optim",
+                                              data=SUBSET)
+#Extract the estimated power parameter
+p_est_interaction$p.max #1.5, in tweedie range
+
+#Tweedie model with interaction
+glmm_interaction<-glmmTMB(copies_g~species*treatment,
+                          family=tweedie,
+                          data=SUBSET)
+summary(glmm_interaction)
+sim_inter<-simulateResiduals(glmm_interaction)
+plot(sim_inter) #Dispersion is significant
+testDispersion(sim_inter) #Most of the data is below the expected median
+#Slightly over dispsersed
+testZeroInflation(sim_inter)
+
+#Tweedie model, additive
+glmm_additive<-glmmTMB(copies_g~species+treatment,
+                       family=tweedie,
+                       data=SUBSET)
+summary(glmm_additive)
+sim_inter<-simulateResiduals(glmm_additive)
+plot(sim_inter) #Quantil test significant
+testDispersion(sim_inter) #Most of the data is under expected median
+testZeroInflation(sim_inter) #Handles zeroes well
+
+#Tweedie model did not fit well for interaction or additive models
+#Test tweedie models on individual species 
+#GAILARDIA
+#Estimate power parameter for gaillardia
+p_est_gai <- tweedie::tweedie.profile(copies_g ~ treatment,
+  p.vec = seq(1.1, 1.9, by = 0.1), 
+  method = "optim",
+  data=subset_gaillardia)
+
+#Extract the estimated power parameter
+p_est_gai$p.max #1.4, good
+
+#Tweedie model with glmmTMB
+glmmTMB_gai <- glmmTMB(copies_g ~ treatment, 
+                       family = tweedie(link="log"), 
+                       data = subset_gaillardia)
+
+plot(sim_gai<-simulateResiduals(glmmTMB_gai))
+testDispersion(sim_gai) #many of the simulated residuals are below the
+#predicted range, however, dispersion is in the expected range (~1)
+testZeroInflation(sim_gai)
+
+#FESTUCA
+#Estimate power parameter
+p_est_fest <- tweedie::tweedie.profile(copies_g ~ treatment,
+                                       p.vec = seq(1.1, 1.9, by = 0.01), 
+                                       method = "optim",
+                                       data=subset_festuca)
+
+#Extract the estimated power parameter
+p_est_fest$p.max #COuld not find left CI, tweedie likely not a good fit for 
+#festuca
+
+#Tweedie model with glmmTMB
+glmmTMB_fest <- glmmTMB(copies_g~treatment, 
+                        family = tweedie,
+                        data = subset_festuca)
+summary(glmmTMB_fest)
+#interpret results knowing the estiamted power paraemet was 1.1
+plot(sim_fest<-simulateResiduals(glmmTMB_fest))
+testDispersion(sim_fest) #Looks okay, slightl underdispersed, but not significant
+#Check predictions
+summary(predict(glmmTMB_fest, type = "response"))
+mean(subset_festuca$copies_g) #Mean is nearly identical, overfit
+
+#BROMUS
+#Estimate power parameter
+p_est_brom <- tweedie::tweedie.profile(copies_g ~ treatment,
+                                       p.vec = seq(1.1, 1.9, by = 0.1), 
+                                       method = "optim",
+                                       data=subset_bromus)
+
+#Extract the estimated power parameter
+p_est_brom$p.max #1.8, okay
+
+#Tweedie model with glmmTMB #glmmTMB set p = 1.5 for tweedie -- cannot alter
+glmmTMB_brom <- glmmTMB(copies_g~treatment, 
+                        family = tweedie(link="log"),
+                        data = subset_bromus)
+
+plot(sim_brom<-simulateResiduals(glmmTMB_brom)) #Significant quantile deviations
+testDispersion(sim_brom) #underestimating
+testZeroInflation(sim_brom) #Okay
+
+#TARAXACUM
+#Estimate power parameter
+p_est_tar <- tweedie::tweedie.profile(copies_g ~ treatment,
+                                      p.vec = seq(1.1, 1.9, by = 0.1), 
+                                      method = "optim",
+                                      data=subset_taraxacum)
+
+#Extract the estimated power parameter
+p_est_tar$p.max #1.5, good
+
+#Tweedie model with glmmTMB 
+glmmTMB_tar <- glmmTMB(copies_g~treatment, 
+                       family = tweedie,
+                       data = subset_taraxacum)
+summary(glmmTMB_tar)
+plot(sim_tar<-simulateResiduals(glmmTMB_tar)) #Okay
+testDispersion(sim_tar) #okay
+testZeroInflation(sim_tar) #Okay
+
+
+```
+Fit of the tweeide models varied substantially between species groups. Not enough data for Gaillardia and Festuca to robustly estimate power parameter. Tweedie 
+did not fit well for the additive model, interaction model, or Bromus.
+
+## Non-parametric approach
+Use Kruskal-Wallis to check for treatment effects within each species group. Kruskal-Wallis was selected due to data distributions that do to uneven zero inflation between groups and a distribution shape that does not support a 
+gamma model (due to presence of zeroes), a hurdle model (due to uneven 
+distiribution of zeroes) nor a tweedie model (due to insufficient data and 
+poor model fit). Because Kruskal-Wallis is non-parametric it ranks the data and 
+does not assume a specific distibrution. This makes it ideal for non-normal
+data with a smaller sample size. However, because it is rank based, Kruskal-
+Wallis can only tell us whether two groups differ and not the specific magnitude.
+#absolute abundance
+```{r}
+#Start with testing main effects
+#TREATMENT
+kruskal.test(copies_g~treatment, data=SUBSET)
+#HOST SPECIES
+kruskal.test(copies_g~species, data=SUBSET)
+
+#By species
+#GAILLARDIA
+kruskal.test(copies_g~treatment, data=subset_gaillardia) #Significant
+#FESTUCA
+kruskal.test(copies_g~treatment, data=subset_festuca) #Significant
+#BROMUS
+kruskal.test(copies_g~treatment, data=subset_bromus) #Not significant
+#TARAXACUM
+kruskal.test(copies_g~treatment, data=subset_taraxacum) #Significant
+
+#Kruskal-Wallis does not tell use which groups are different,
+#a Dunn test can be used for post-hoc comparisons
+
+#Used benjamin hochbberg adjustment to control for false discovery with
+#multiple comparisons. Less conservative than holm or tukey.
+#TREATMENT
+dunnTest(copies_g ~ treatment, data = SUBSET, method = "holm") 
+#SPECIES
+dunnTest(copies_g ~ species, data = SUBSET, method = "holm") 
+#GAILLARDIA
+dunnTest(copies_g ~ treatment, data = subset_gaillardia, method = "bh") 
+#FESTUCA
+dunnTest(copies_g ~ treatment, data = subset_festuca, method = "bh") 
+#BROMUS
+dunnTest(copies_g ~ treatment, data = subset_bromus, method = "bh") #Npt signficiant
+#TARAXACUM
+dunnTest(copies_g ~ treatment, data = subset_taraxacum, method = "bh") 
+
+#Test for whether species identity effects abundance
+#197198
+kruskal.test(copies_g~species, data=subset_197198) #Not significant
+#240448
+kruskal.test(copies_g~species, data=subset_240448) #Significant
+#240720
+kruskal.test(copies_g~species, data=subset_240720) #Marginally significant
+
+#Follow up with Dunn test on 240448 and 240720
+#Dunn 240448
+dunnTest(copies_g ~ species, data = subset_240448, method = "bh") 
+#Marginally significant difference between Bromus and Taraxacum
+#Dun 240720
+dunnTest(copies_g ~ species, data = subset_240720, method = "bh")
+#No differences after pairwise comparisons
+```
+
+## Create visuals with significance stars
+
+```{r}
+#Create visual with significance stars, 
+
+#Start by creating species and treatment labels
+
+#Species labels (italicized for strip titles and x-axis)
+species_labels <- c(
+  "Bromus" = expression(italic("B. tectorum")),
+  "Gaillardia" = expression(italic("G. aristata")),
+  "Festuca" = expression(italic("F. idahoensis")),
+  "Taraxacum" = expression(italic("T. officinale"))
+)
+#Treatment labels for facet strip and legend
+treatment_labels <- c(
+  "197198" = "DAOM 197198",
+  "240448" = "DAOM 240448",
+  "240720" = "DAOM 240720"
+)
+
+#Create a base plot for treatment within species
+plot_copies_sig <- ggplot(SUBSET, aes(x = treatment, y = copies_g, color = treatment)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  facet_wrap(~species, scales = "free_x", labeller = labeller(species = species_labels)) +
+  labs(
+    title = "Dunn",
+    x = "AMF Isolate Treatment",
+    y = "Copies of mat locus gene per gram of host root",
+    color = "AMF isolate treatment"
+  ) +
+  
+  scale_y_continuous(limits = c(0, 1.1 * max(SUBSET$copies_g, na.rm = FALSE)),
+                       labels = scales::label_number()) +# disables scientific notation
+  coord_cartesian(ylim = c(0, 250000)) +
+  scale_colour_brewer(palette = "Dark2") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    strip.text = element_text(face = "italic"),
+    legend.position = "bottom"
+  )
+
+print(plot_copies_sig)
+
+#Calculate y for each facet
+y_max <- SUBSET %>%
+  group_by(species) %>%
+  summarise(y_max = max(copies_g, na.rm = TRUE) * 1.1)
+
+global_max_y <- max(y_max$y_max, na.rm = TRUE)
+
+#Create significance annotation table for treatment within species
+sig_annotations <- data.frame(
+  species = c(
+    "Gaillardia", "Gaillardia", "Gaillardia",
+    "Festuca", "Festuca", "Festuca",
+    "Bromus", "Bromus", "Bromus",
+    "Taraxacum", "Taraxacum", "Taraxacum"
+  ),
+  group1 = c(
+    "197198", "197198", "240448",
+    "197198", "197198", "240448",
+    "197198", "197198", "240448",
+    "197198", "197198", "240448"
+  ),
+  group2 = c(
+    "240448", "240720", "240720",
+    "240448", "240720", "240720",
+    "240448", "240720", "240720",
+    "240448", "240720", "240720"
+  ),
+  p.adj = c(
+    0.1678, 0.0282, 0.0006,  # Gaillardia: 197198-240448, 197198-240720, 240448-240720
+    0.0416, 0.1638, 0.0010,  # Festuca:    same order
+    0.6317, 0.2449, 0.1830,  # Bromus:     all non-significant
+    0.0663, 0.0859, 0.0006   # Taraxacum:  marginal + one significant
+  )
+)
+
+#Add significance labels to plot
+sig_annotations <- sig_annotations %>%
+  mutate(
+    p.label = case_when(
+      p.adj < 0.001 ~ "***",
+      p.adj < 0.01  ~ "**",
+      p.adj < 0.05  ~ "*"
+    )
+  ) %>%
+  filter(!is.na(p.label)) %>%
+  left_join(y_max, by = "species") %>%
+  group_by(species) %>%
+  mutate(offset = row_number() - 1,
+         y.position = y_max + offset * (global_max_y * 0.1)) %>%
+  ungroup()
+
+plot_copies_sig <- plot_copies_sig +
+  stat_pvalue_manual(
+    data = sig_annotations,
+    label = "p.label",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = "y.position",
+    tip.length = 0.01,
+    bracket.size = 0.5
+  )
+
+print(plot_copies_sig)
+
+#HOST SPECIES WITHIN TREATMENT
+treatment_labels <- c(
+  `197198` = "DAOM 197198",
+  `240448` = "DAOM 240448",
+  `240720` = "DAOM 240720"
+)
+
+facet_wrap(~treatment, scales = "free_x", 
+           labeller = labeller(treatment = treatment_labels))
+
+#CReate visual with significance stars, 
+
+#Create significance annotation table for species comparisons
+sig_annotations_treat <- data.frame(
+  treatment = c(
+    rep("240448", 6),
+    rep("240720", 6)
+  ),
+  group1 = c(
+    "Bromus", "Bromus", "Festuca", "Bromus", "Festuca", "Gaillardia",
+    "Bromus", "Bromus", "Festuca", "Bromus", "Festuca", "Gaillardia"
+  ),
+  group2 = c(
+    "Festuca", "Gaillardia", "Gaillardia", "Taraxacum", "Taraxacum", "Taraxacum",
+    "Festuca", "Gaillardia", "Gaillardia", "Taraxacum", "Taraxacum", "Taraxacum"
+  ),
+  p.adj = c(
+    0.9611, 0.0708, 0.0841, 0.0461, 0.0806, 0.7927,   # from dunnTest on 240448
+    0.3022, 0.3928, 0.0674, 0.9033, 0.3075, 0.3297    # from dunnTest on 240720
+  )
+)
+
+#Add significance labels
+sig_annotations_treat <- sig_annotations_treat %>%
+  mutate(
+    p.label = case_when(
+      p.adj < 0.001 ~ "***",
+      p.adj < 0.01  ~ "**",
+      p.adj < 0.05  ~ "*"
+    )
+  ) %>%
+  filter(!is.na(p.label))
+
+#Get max y-value per treatment for y.position calculation
+y_max <- SUBSET %>%
+  group_by(treatment) %>%
+  summarise(y_max = max(copies_g, na.rm = TRUE) * 1.1)
+
+global_max_y <- max(y_max$y_max, na.rm = TRUE)
+
+#Add staggered y positions
+sig_annotations_treat <- sig_annotations_treat %>%
+  left_join(y_max, by = "treatment") %>%
+  group_by(treatment) %>%
+  mutate(offset = row_number() - 1) %>%
+  mutate(
+    y.position = y_max + offset * (global_max_y * 0.1)
+  ) %>%
+  ungroup()
+
+#Create base plot
+plot_copies_sig_treat <- ggplot(SUBSET, aes(x = species, y = copies_g, color = treatment)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA, outlier.alpha = 1) +
+  facet_wrap(~treatment, scales = "free_x", labeller = labeller(treatment = treatment_labels)) +
+  labs(
+    title = "Dunn",
+    x = "Host Species",
+    y = "Copies of mat-locus gene per gram of host root",
+    color = "AMF isolate"
+  ) +
+  scale_x_discrete(labels = species_labels) +
+  scale_y_continuous(labels = scales::label_number()) +
+  coord_cartesian(ylim = c(0, 250000)) +
+  scale_color_manual(
+    values = RColorBrewer::brewer.pal(4, "Dark2"),
+    labels = species_labels,
+    guide = guide_legend(override.aes = list(alpha = 1)),
+    aesthetics = "color"
+  ) +
+  stat_pvalue_manual(
+    data = sig_annotations_treat,
+    label = "p.label",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = "y.position",
+    tip.length = 0.01,
+    bracket.size = 0.5
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  )
+
+print(plot_copies_sig_treat)
+
+```
