@@ -1,0 +1,293 @@
+---
+title: "Plant Community Response"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-08-05"
+---
+
+```{r setup, include=TRUE}
+#Load libraries
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(viridis)
+library(ggpubr)
+library(rstatix)
+library(glmmTMB)
+library(boot)
+library(tidyr)
+library(vegan)
+library(tibble)  
+library(dplyr)   
+library(purrr)   
+library(boot)  
+```
+
+# Load the dataset and calcualte relative biomass
+To calculate relative biomass, the total biomass per species was divided by the
+total biomass within a mesocosm. 
+
+```{r}
+#Import the dataset
+data_mortality <- read_excel(file.path(
+  "C:/Users/Joyalea/Documents/UBCO/Thesis",
+  "Final_Files",
+  "RQ3_PlantCommunityResponse",
+  "MasterCopy_Biomass_2024.xlsx"
+))
+
+#Add treatment group column
+data_mortality <- data_mortality %>%
+  mutate(treatment = ifelse(mesocosm_id %in% c(1:7), "Control",
+                            ifelse(mesocosm_id %in% c(8:14), "197198",
+                                   ifelse(mesocosm_id %in% c(15:21), "240448",
+                            ifelse(mesocosm_id %in% c(22:28), "240720", NA)))),
+         block = ifelse(mesocosm_id %in% c(15, 20, 22, 12, 11, 14, 24, 27, 
+                                           19, 21, 25, 3, 2, 7), "A",
+                        ifelse(mesocosm_id %in% c(4, 17, 9, 28, 6, 1, 5, 18, 8, 
+                                              26, 16, 23, 13, 10), "B", NA)))
+#Review the data
+head(data_mortality)
+str(data_mortality)
+
+#Summarize count of individuals
+counts_df <- data_mortality %>%
+  filter(species == "Bromus", is.na(biomass)) %>%
+  group_by(species, treatment) %>%
+  summarise(n_individuals = n(), .groups = "drop")
+
+#Summarize relative biomass (species biomass / total meso biomass)
+rel_biomass <- data_mortality %>%
+  group_by(mesocosm_id) %>%
+  mutate(total_biomass = sum(biomass, na.rm = TRUE)) %>%
+  group_by(mesocosm_id, species, treatment) %>%
+  summarise(
+    species_biomass = sum(biomass, na.rm = TRUE),
+    total_biomass = unique(total_biomass),
+    rel_biomass = species_biomass / total_biomass,
+    .groups = "drop"
+  )
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+## Analyse changes in plant community structure (beta diversity) using relative host biomass
+Relative host biomass was used as opposed to counts to account for overall
+growth of a species in a mesocosm, which can indirectly account for mortality
+
+```{r}
+
+#Change data structure for bray analysis (convert columns to rows)
+pivot_rel_biomass <- rel_biomass %>%
+  select(mesocosm_id, species, rel_biomass) %>%
+  pivot_wider(names_from = species, values_from = rel_biomass, values_fill = 0) %>%
+  column_to_rownames("mesocosm_id")
+
+#Create metadata
+metadata <- rel_biomass %>%
+  select(mesocosm_id, treatment) %>%
+  distinct()
+
+metadata <- metadata %>%
+  filter(mesocosm_id %in% rownames(pivot_rel_biomass)) %>%
+  arrange(match(mesocosm_id, rownames(pivot_rel_biomass)))
+
+#Check it worked correctly
+View(metadata)
+
+#Create Bray-Curtis dissimilarity matrix
+bray_dist <- vegdist(pivot_rel_biomass, method = "bray")
+
+print(adonis2(bray_dist ~ treatment, data = metadata, permutations = 999))
+#Significant
+
+#Check dispersion to ensure ANOVA assumptions are met
+dispersion <- betadisper(bray_dist, metadata$treatment)
+anova(dispersion) #Not significant
+plot(dispersion)
+boxplot(dispersion)
+
+#Pairwise comparisons
+pairwiseAdonis::pairwise.adonis(
+  x = as.matrix(bray_dist),
+  factors = metadata$treatment,
+  sim.function = "vegdist",
+  sim.method = "bray",
+  p.adjust.m = "BH"
+)
+
+#SIMPER analysis to see which species are driving the difference
+simper_results <- simper(pivot_rel_biomass, group = metadata$treatment, 
+                         permutations = 999)
+
+#View SIMPER results for each treatment pair
+summary(simper_results) #Driven by Gaillardia
+
+
+```
+
+## Visualise relative biomass by treatment using a stacked barplot
+
+```{r}
+
+#Calculate mean +/- SD of relative biomass per species per treatment
+rel_biomass <- rel_biomass %>%
+  group_by(treatment, species) %>%
+  summarise(mean_rel_biomass = mean(rel_biomass, na.rm = TRUE),
+            sd_rel_biomass = sd(rel_biomass, na.rm = TRUE),
+            .groups = "drop")
+
+#Plot: stacked bar of mean relative biomass per treatment
+rel_biomass_plot<-ggplot(rel_biomass, aes(x = treatment, y = mean_rel_biomass, fill = species)) +
+  geom_col(position = "stack", width = 0.8, alpha = 0.95) +
+  labs(title = "Mean Relative Biomass Composition by Treatment",
+       y = "Relative Biomass",
+       x = "Treatment") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 1), expand = c(0, 0)) +
+  scale_fill_brewer(palette = "Paired", name = "Species") +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  )
+print(rel_biomass_plot)
+
+```
+
+## Evaluate alpha diversity metrics
+
+```{r}
+
+#Evaluate community richness (# of species present in a mesocosm)
+richness <- specnumber(pivot_rel_biomass) #All species present in all mesocosms
+
+#Shannon diversity
+shannon_div <- diversity(pivot_rel_biomass, index = "shannon")
+
+#Pielou’s Evenness
+evenness <- shannon_div / log(richness)
+
+#Combine into data frame
+diversity_df <- data.frame(
+  mesocosm_id = rownames(pivot_rel_biomass),
+  shannon = shannon_div,
+  richness = richness,
+  evenness = evenness
+) %>%
+  # Ensure mesocosm_id is character for joining
+  mutate(mesocosm_id = as.factor(mesocosm_id)) %>%
+  # Add treatment or other metadata
+  left_join(metadata %>% mutate(mesocosm_id = as.factor(mesocosm_id)), 
+            by = "mesocosm_id")
+
+#Test for treatment effects on evenness
+kruskal_result <- kruskal.test(evenness ~ treatment, data = diversity_df)
+kruskal_result
+
+#Test for treatment effects on shannon diversity
+#Test for treatment effects on evenness
+kruskal_result_shannon <- kruskal.test(shannon_div ~ treatment, data = diversity_df)
+kruskal_result_shannon
+
+```
+
+## Analysis of host mortality 
+
+```{r, echo=FALSE}
+
+#Plot host mortality based on the count_df dataframe
+print(ggplot(counts_df, aes(x = species, y = n_individuals, fill = treatment)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7, alpha = 0.9) +
+  labs(title = "Number of Individuals by Species and Treatment",
+       y = "Number of Mortalities") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  ))
+
+#Convert to % survivial
+survivors_df <- data_mortality %>%
+  filter(!is.na(species), biomass > 0) %>%
+  group_by(species, treatment) %>%
+  summarise(n_survived = n(), .groups = "drop")
+
+#Count total planted by group
+total_df <- data_mortality %>%
+  filter(!is.na(species)) %>%
+  group_by(species, treatment) %>%
+  summarise(n_total = n(), .groups = "drop")
+
+
+#Merge and compute % survival of each host specoes
+survival_df <- left_join(total_df, survivors_df, by = c("species", "treatment")) %>%
+  mutate(n_survived = replace_na(n_survived, 0),  # Fill 0 where no survival recorded
+         percent_survival = (n_survived / n_total) * 100)
+
+#Plot % survival
+ggplot(survival_df, aes(x = species, y = percent_survival, fill = treatment)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7, alpha = 0.9) +
+  labs(title = "Percent Survival by Species and Treatment",
+       y = "% Survival",
+       x = "Species") +
+  scale_y_continuous(limits = c(0, 100), expand = c(0, 0)) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  )
+
+#As Bromus was the only species group with variaiton in mortality. Subset Bromus.
+bromus_survival <- survival_df %>%
+  filter(species == "Bromus")
+print(bromus_survival)
+
+#Plot bromus % survival
+bromus_percent_survival<-ggplot(bromus_survival, aes(x = treatment, y = percent_survival, fill = treatment)) +
+  geom_col(width = 0.7, alpha = 0.9) +
+  labs(title = "Percent Survival in Bromus by Treatment",
+       y = "% Survival",
+       x = "Treatment") +
+  scale_y_continuous(limits = c(0, 100), expand = c(0, 0)) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  )
+
+#Summarize deaths (biomass == NA)
+deaths_df <- data_mortality %>%
+  filter(species == "Bromus", is.na(biomass)) %>%
+  count(treatment, name = "dead")
+
+#Summarize survivals (biomass != NA)
+survivors_df <- data_mortality %>%
+  filter(species == "Bromus", !is.na(biomass)) %>%
+  count(treatment, name = "alive")
+
+#Merge and fill missing 0s
+mortality_table <- full_join(deaths_df, survivors_df, by = "treatment") %>%
+  mutate(across(c(dead, alive), ~replace_na(., 0))) %>%
+  arrange(treatment)
+
+#Prepare matrix to perform fisher exact test (convert table to matrix)
+fisher_matrix <- mortality_table %>%
+  select(dead, alive) %>%
+  as.matrix()
+
+#Fishers exact test
+fisher_result <- fisher.test(fisher_matrix)
+print(fisher_result) #No significant differences in bromus mortality
+
+
+```
